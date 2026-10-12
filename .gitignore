@@ -4,5 +4,6 @@
 *.o
 *.swp
 *~
+*.zip
 .idea/
 .vscode/
