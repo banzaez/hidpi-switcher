@@ -1,24 +1,34 @@
 import Foundation
 import ServiceManagement
+import os
 
+private let log = Logger(subsystem: "com.local.HiDpiSwitcher", category: "LaunchAtLogin")
+
+@MainActor
 final class LaunchAtLoginManager: ObservableObject {
-    @Published var isEnabled: Bool = false
+    @Published private(set) var isEnabled: Bool = false
+    @Published var lastError: String?
 
     init() {
-        self.isEnabled = (SMAppService.mainApp.status == .enabled)
+        refresh()
     }
 
-    func toggle() {
+    func refresh() {
+        isEnabled = (SMAppService.mainApp.status == .enabled)
+    }
+
+    func setEnabled(_ enabled: Bool) {
         do {
-            if isEnabled {
-                try SMAppService.mainApp.unregister()
-            } else {
+            if enabled {
                 try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
             }
-            isEnabled = (SMAppService.mainApp.status == .enabled)
+            lastError = nil
         } catch {
-            print("Ошибка при изменении статуса автозапуска: \(error.localizedDescription)")
-            isEnabled = (SMAppService.mainApp.status == .enabled)
+            log.error("Ошибка автозапуска: \(error.localizedDescription)")
+            lastError = "Автозапуск: \(error.localizedDescription)"
         }
+        refresh()
     }
 }

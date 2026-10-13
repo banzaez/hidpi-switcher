@@ -1,6 +1,7 @@
-#import <Foundation/Foundation.h>
-#import <CoreGraphics/CoreGraphics.h>
+#import "CGSBridge.h"
 
+// Приватная структура описания режима CGS. Поле `density` лежит по смещению 208
+// и заканчивается ровно на 0xD4 (212) байтах — именно эта длина запрашивается у CGS.
 typedef union
 {
     uint8_t rawData[0xDC];
@@ -19,27 +20,14 @@ typedef union
     } derived;
 } modes_D4;
 
+static const int kCGSModeDescriptionLength = 0xD4;
+
 extern void CGSGetCurrentDisplayMode(CGDirectDisplayID display, int* modeNum);
 extern void CGSGetNumberOfDisplayModes(CGDirectDisplayID display, int* nModes);
 extern void CGSGetDisplayModeDescriptionOfLength(CGDirectDisplayID display, int idx, modes_D4* mode, int length);
 extern void CGSConfigureDisplayMode(CGDisplayConfigRef config, CGDirectDisplayID display, int modeNum);
 
-@interface CGSModeItem : NSObject
-@property (nonatomic) int modeID;
-@property (nonatomic) uint32_t width;
-@property (nonatomic) uint32_t height;
-@property (nonatomic) uint16_t freq;
-@property (nonatomic) float density;
-@property (nonatomic) BOOL isHiDPI;
-@end
-
 @implementation CGSModeItem
-@end
-
-@interface CGSBridge : NSObject
-+ (int)currentModeIDForDisplay:(CGDirectDisplayID)displayID;
-+ (NSArray<CGSModeItem *> *)allModesForDisplay:(CGDirectDisplayID)displayID;
-+ (BOOL)setDisplayMode:(int)modeID forDisplay:(CGDirectDisplayID)displayID;
 @end
 
 @implementation CGSBridge
@@ -53,15 +41,18 @@ extern void CGSConfigureDisplayMode(CGDisplayConfigRef config, CGDirectDisplayID
 + (NSArray<CGSModeItem *> *)allModesForDisplay:(CGDirectDisplayID)displayID {
     int count = 0;
     CGSGetNumberOfDisplayModes(displayID, &count);
-    NSMutableArray *result = [NSMutableArray array];
+    if (count <= 0) {
+        return @[];
+    }
+    NSMutableArray<CGSModeItem *> *result = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
 
     modes_D4 modeInfo;
     for (int i = 0; i < count; i++) {
         memset(&modeInfo, 0, sizeof(modeInfo));
-        CGSGetDisplayModeDescriptionOfLength(displayID, i, &modeInfo, 0xD4);
-        
+        CGSGetDisplayModeDescriptionOfLength(displayID, i, &modeInfo, kCGSModeDescriptionLength);
+
         CGSModeItem *item = [[CGSModeItem alloc] init];
-        item.modeID = modeInfo.derived.mode;
+        item.modeID = (int)modeInfo.derived.mode;
         item.width = modeInfo.derived.width;
         item.height = modeInfo.derived.height;
         item.freq = modeInfo.derived.freq;
@@ -73,13 +64,18 @@ extern void CGSConfigureDisplayMode(CGDisplayConfigRef config, CGDirectDisplayID
 }
 
 + (BOOL)setDisplayMode:(int)modeID forDisplay:(CGDirectDisplayID)displayID {
-    CGDisplayConfigRef cfg;
+    CGDisplayConfigRef cfg = NULL;
     if (CGBeginDisplayConfiguration(&cfg) != kCGErrorSuccess) {
         return NO;
     }
     CGSConfigureDisplayMode(cfg, displayID, modeID);
-    CGError err = CGCompleteDisplayConfiguration(cfg, kCGConfigurePermanently);
-    return (err == kCGErrorSuccess);
+    // Только на время сессии: неудачный режим не переживёт перезагрузку.
+    CGError err = CGCompleteDisplayConfiguration(cfg, kCGConfigureForSession);
+    if (err != kCGErrorSuccess) {
+        CGCancelDisplayConfiguration(cfg);
+        return NO;
+    }
+    return YES;
 }
 
 @end

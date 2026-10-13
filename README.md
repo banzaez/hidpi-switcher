@@ -26,6 +26,17 @@
 ./build.sh install
 ```
 
+Сборка — universal (arm64 + x86_64), минимум macOS 13.0. Подпись по умолчанию ad-hoc; для своего сертификата:
+```bash
+SIGN_IDENTITY="Developer ID Application: ..." ./build.sh
+```
+Для распространения через `.zip` потребуется нотаризация (`xcrun notarytool`), иначе Gatekeeper заблокирует приложение.
+
+## Важно
+
+- Приложение использует **приватные API** CoreGraphics (`CGS*`), они могут измениться в новых версиях macOS. Для App Store не подходит.
+- Режим применяется только на время сессии (`kCGConfigureForSession`) — после перезагрузки вернётся прежний.
+
 ## Лицензия
 
 MIT

@@ -1,5 +1,8 @@
-import Foundation
+import AppKit
 import CoreGraphics
+import os
+
+private let log = Logger(subsystem: "com.local.HiDpiSwitcher", category: "DisplayManager")
 
 struct DisplayDevice: Identifiable, Hashable {
     let id: CGDirectDisplayID
@@ -27,14 +30,31 @@ struct ModeEntry: Identifiable, Hashable {
     }
 }
 
+private struct ModeKey: Hashable {
+    let width: Int
+    let height: Int
+    let freq: Int
+    let isHiDPI: Bool
+}
+
+/// Слабая ссылка для безопасной передачи в C-callback.
+private final class WeakManagerBox: @unchecked Sendable {
+    weak var manager: DisplayManager?
+    init(_ manager: DisplayManager) { self.manager = manager }
+}
+
+@MainActor
 final class DisplayManager: ObservableObject {
     @Published var connectedDisplays: [DisplayDevice] = []
     @Published var selectedDisplayID: CGDirectDisplayID = CGMainDisplayID()
-    @Published var availableModes: [ModeEntry] = []
+    @Published private(set) var availableModes: [ModeEntry] = []
+    @Published private(set) var hidpiModes: [ModeEntry] = []
+    @Published private(set) var standardModes: [ModeEntry] = []
     @Published var currentMode: ModeEntry?
     @Published var isHiDPIActive: Bool = false
+    @Published var lastError: String?
 
-    private var reconfigCallbackRegistered = false
+    private nonisolated(unsafe) var callbackContext: UnsafeMutableRawPointer?
 
     init() {
         registerReconfigCallback()
@@ -42,25 +62,29 @@ final class DisplayManager: ObservableObject {
     }
 
     deinit {
-        if reconfigCallbackRegistered {
-            CGDisplayRemoveReconfigurationCallback(DisplayManager.reconfigCallback, Unmanaged.passUnretained(self).toOpaque())
+        if let ctx = callbackContext {
+            CGDisplayRemoveReconfigurationCallback(DisplayManager.reconfigCallback, ctx)
+            Unmanaged<WeakManagerBox>.fromOpaque(ctx).release()
         }
     }
 
     private func registerReconfigCallback() {
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        let err = CGDisplayRegisterReconfigurationCallback(DisplayManager.reconfigCallback, context)
+        let ctx = Unmanaged.passRetained(WeakManagerBox(self)).toOpaque()
+        let err = CGDisplayRegisterReconfigurationCallback(DisplayManager.reconfigCallback, ctx)
         if err == .success {
-            reconfigCallbackRegistered = true
+            callbackContext = ctx
+        } else {
+            Unmanaged<WeakManagerBox>.fromOpaque(ctx).release()
+            log.error("Не удалось зарегистрировать callback: \(err.rawValue)")
         }
     }
 
-    private static let reconfigCallback: @convention(c) (CGDirectDisplayID, CGDisplayChangeSummaryFlags, UnsafeMutableRawPointer?) -> Void = { (display, flags, userInfo) in
-        guard let userInfo = userInfo else { return }
-        if !flags.contains(.beginConfigurationFlag) {
-            let manager = Unmanaged<DisplayManager>.fromOpaque(userInfo).takeUnretainedValue()
-            DispatchQueue.main.async {
-                manager.refreshDisplays()
+    private nonisolated static let reconfigCallback: CGDisplayReconfigurationCallBack = { _, flags, userInfo in
+        guard let userInfo = userInfo, !flags.contains(.beginConfigurationFlag) else { return }
+        let box = Unmanaged<WeakManagerBox>.fromOpaque(userInfo).takeUnretainedValue()
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                box.manager?.refreshDisplays()
             }
         }
     }
@@ -72,30 +96,33 @@ final class DisplayManager: ObservableObject {
 
     func refreshDisplays() {
         var count: UInt32 = 0
-        var list = [CGDirectDisplayID](repeating: 0, count: 16)
-        CGGetActiveDisplayList(16, &list, &count)
-
-        var devices: [DisplayDevice] = []
-        for i in 0..<Int(count) {
-            let d = list[i]
-            let isMain = CGDisplayIsMain(d) != 0
-            let isBuiltin = CGDisplayIsBuiltin(d) != 0
-            let name = getDisplayName(d)
-
-            devices.append(DisplayDevice(
-                id: d,
-                name: name,
-                isMain: isMain,
-                isBuiltin: isBuiltin
-            ))
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
+            log.error("CGGetActiveDisplayList: нет активных дисплеев")
+            return
+        }
+        var list = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &list, &count) == .success else {
+            log.error("CGGetActiveDisplayList: ошибка получения списка")
+            return
         }
 
-        self.connectedDisplays = devices
+        let devices: [DisplayDevice] = list.prefix(Int(count)).map { d in
+            DisplayDevice(
+                id: d,
+                name: Self.displayName(for: d),
+                isMain: CGDisplayIsMain(d) != 0,
+                isBuiltin: CGDisplayIsBuiltin(d) != 0
+            )
+        }
+
+        if devices != connectedDisplays {
+            connectedDisplays = devices
+        }
 
         // Если текущий выбранный экран больше не подключен, выбираем внешний или основной
         if !devices.contains(where: { $0.id == selectedDisplayID }) {
             let preferred = devices.first(where: { !$0.isBuiltin }) ?? devices.first(where: { $0.isMain }) ?? devices.first
-            self.selectedDisplayID = preferred?.id ?? CGMainDisplayID()
+            selectedDisplayID = preferred?.id ?? CGMainDisplayID()
         }
 
         refreshModes()
@@ -103,110 +130,96 @@ final class DisplayManager: ObservableObject {
 
     func refreshModes() {
         let currentID = CGSBridge.currentModeID(forDisplay: selectedDisplayID)
-        guard let items = CGSBridge.allModes(forDisplay: selectedDisplayID) else { return }
+        let items = CGSBridge.allModes(forDisplay: selectedDisplayID) ?? []
 
         var modes: [ModeEntry] = []
-        var seen = Set<String>()
+        var seen = Set<ModeKey>()
+        var current: ModeEntry?
 
         for it in items {
-            let w = Int(it.width)
-            let h = Int(it.height)
-            let f = Int(it.freq)
-            let isHi = it.isHiDPI
-
             let entry = ModeEntry(
                 id: Int(it.modeID),
-                width: w,
-                height: h,
-                freq: f,
+                width: Int(it.width),
+                height: Int(it.height),
+                freq: Int(it.freq),
                 density: it.density,
-                isHiDPI: isHi
+                isHiDPI: it.isHiDPI
             )
 
-            let key = "\(w)x\(h)@\(f)-\(isHi)"
-            if !seen.contains(key) {
-                seen.insert(key)
+            let key = ModeKey(width: entry.width, height: entry.height, freq: entry.freq, isHiDPI: entry.isHiDPI)
+            if seen.insert(key).inserted {
                 modes.append(entry)
+            } else if entry.id == Int(currentID),
+                      let idx = modes.firstIndex(where: {
+                          ModeKey(width: $0.width, height: $0.height, freq: $0.freq, isHiDPI: $0.isHiDPI) == key
+                      }) {
+                modes[idx] = entry
             }
-
-            if Int(it.modeID) == currentID {
-                self.currentMode = entry
-                self.isHiDPIActive = isHi
+            if entry.id == Int(currentID) {
+                current = entry
             }
         }
 
-        self.availableModes = modes.sorted {
+        modes.sort {
             if $0.isHiDPI != $1.isHiDPI { return $0.isHiDPI && !$1.isHiDPI }
-            if ($0.width * $0.height) != ($1.width * $1.height) {
-                return ($0.width * $0.height) > ($1.width * $1.height)
-            }
+            let a0 = $0.width * $0.height, a1 = $1.width * $1.height
+            if a0 != a1 { return a0 > a1 }
             return $0.freq > $1.freq
         }
+
+        availableModes = modes
+        hidpiModes = modes.filter { $0.isHiDPI && $0.width >= 1280 }
+        standardModes = modes.filter { !$0.isHiDPI && $0.width >= 1280 }
+        // Всегда сбрасываем состояние, чтобы не оставалось данных от другого экрана
+        currentMode = current
+        isHiDPIActive = current?.isHiDPI ?? false
     }
 
     /// Мгновенное переключение HiDPI для текущего выбранного монитора
     func toggleHiDPI() {
-        guard let current = currentMode else { return }
-        let targetHiDPI = !current.isHiDPI
+        guard let current = currentMode,
+              let match = Self.findToggleTarget(from: current, in: availableModes) else { return }
+        setMode(match)
+    }
 
-        // 1. Поиск режима с той же геометрией и частотой
-        let exactMatch = availableModes.first {
-            $0.width == current.width &&
-            $0.height == current.height &&
-            $0.freq == current.freq &&
-            $0.isHiDPI == targetHiDPI
-        }
-
-        if let match = exactMatch {
-            setMode(match)
-            return
-        }
-
-        // 2. Поиск по ширине и высоте
-        let resolutionMatch = availableModes.first {
-            $0.width == current.width &&
-            $0.height == current.height &&
-            $0.isHiDPI == targetHiDPI
-        }
-
-        if let match = resolutionMatch {
-            setMode(match)
-            return
-        }
-
-        // 3. Фолбэк
-        if let fallback = availableModes.first(where: { $0.isHiDPI == targetHiDPI }) {
-            setMode(fallback)
-        }
+    /// Чистая функция подбора режима (удобна для тестов).
+    nonisolated static func findToggleTarget(from current: ModeEntry, in modes: [ModeEntry]) -> ModeEntry? {
+        let target = !current.isHiDPI
+        // 1. Та же геометрия и частота
+        if let m = modes.first(where: {
+            $0.width == current.width && $0.height == current.height &&
+            $0.freq == current.freq && $0.isHiDPI == target
+        }) { return m }
+        // 2. Та же геометрия
+        if let m = modes.first(where: {
+            $0.width == current.width && $0.height == current.height && $0.isHiDPI == target
+        }) { return m }
+        // 3. Фолбэк: ближайший по площади режим нужного типа (а не самый большой)
+        let area = current.width * current.height
+        return modes
+            .filter { $0.isHiDPI == target }
+            .min { abs($0.width * $0.height - area) < abs($1.width * $1.height - area) }
     }
 
     func setMode(_ mode: ModeEntry) {
         if CGSBridge.setDisplayMode(Int32(mode.id), forDisplay: selectedDisplayID) {
-            self.currentMode = mode
-            self.isHiDPIActive = mode.isHiDPI
+            lastError = nil
+            // Обновление состояния придёт через reconfiguration callback;
+            // вызываем сразу, чтобы UI не ждал события.
             refreshModes()
+        } else {
+            lastError = "Не удалось переключить режим: \(mode.title)"
+            log.error("setDisplayMode failed: \(mode.title)")
         }
     }
 
-    private func getDisplayName(_ displayID: CGDirectDisplayID) -> String {
-        if CGDisplayIsBuiltin(displayID) != 0 {
-            return "Built-in Display"
+    private static func displayName(for displayID: CGDirectDisplayID) -> String {
+        let screen = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
         }
-        let vendor = CGDisplayVendorNumber(displayID)
-        let model = CGDisplayModelNumber(displayID)
-
-        switch vendor {
-        case 19501: // 0x4C2D Samsung
-            if model == 3621 { return "Samsung C34H89x" }
-            return "Samsung Display"
-        case 4268: // 0x10AC Dell
-            return "Dell Display"
-        case 7789: // 0x1E6D LG
-            return "LG Display"
-        case 1552: // Apple
-            return "Apple Display"
-        default:
-            return "External Display"
+        if let name = screen?.localizedName, !name.isEmpty {
+            return name
         }
+        return CGDisplayIsBuiltin(displayID) != 0 ? "Built-in Display" : "External Display"
     }
 }

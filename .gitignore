@@ -7,3 +7,6 @@
 *.zip
 .idea/
 .vscode/
+.swiftpm/
+xcuserdata/
+DerivedData/
