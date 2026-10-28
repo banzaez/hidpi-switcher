@@ -8,6 +8,7 @@ public protocol DisplayPreferencesStoreProtocol: AnyObject {
     var autoRestoreSavedMode: Bool { get set }
     var globalHotKeysEnabled: Bool { get set }
     var showAllResolutions: Bool { get set }
+    var alwaysConfirmModeChanges: Bool { get set }
 
     func preferredModeKey(for display: DisplayDevice) -> ModeKey?
     func setPreferredModeKey(_ key: ModeKey?, for display: DisplayDevice)
@@ -27,6 +28,7 @@ public final class UserDefaultsDisplayPreferencesStore: DisplayPreferencesStoreP
         static let autoRestoreSavedMode = "HiDpiSwitcher.autoRestoreSavedMode"
         static let globalHotKeysEnabled = "HiDpiSwitcher.globalHotKeysEnabled"
         static let showAllResolutions = "HiDpiSwitcher.showAllResolutions"
+        static let alwaysConfirmModeChanges = "HiDpiSwitcher.alwaysConfirmModeChanges"
         static let preferredModesPrefix = "HiDpiSwitcher.preferredMode."
         static let favoriteModesPrefix = "HiDpiSwitcher.favoriteModes."
         static let verifiedModesPrefix = "HiDpiSwitcher.verifiedModes."
@@ -81,6 +83,16 @@ public final class UserDefaultsDisplayPreferencesStore: DisplayPreferencesStoreP
         }
         set {
             defaults.set(newValue, forKey: Keys.showAllResolutions)
+        }
+    }
+
+    public var alwaysConfirmModeChanges: Bool {
+        get {
+            guard defaults.object(forKey: Keys.alwaysConfirmModeChanges) != nil else { return true }
+            return defaults.bool(forKey: Keys.alwaysConfirmModeChanges)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.alwaysConfirmModeChanges)
         }
     }
 

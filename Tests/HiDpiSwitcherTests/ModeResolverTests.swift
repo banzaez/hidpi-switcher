@@ -52,6 +52,23 @@ struct ModeResolverTests {
         #expect(catalog.availableRefreshRates.map(\.freq) == [144, 120, 60])
     }
 
+    @Test("Частоты, которых нет у нативного сигнала панели, отбрасываются (иначе выводится обрезанная картинка)")
+    func phantomRefreshRatesAreFilteredOut() {
+        let rawModes = [
+            DisplayMode(id: 1, width: 3440, height: 1440, freq: 100, density: 1.0, isHiDPI: false),
+            DisplayMode(id: 2, width: 3440, height: 1440, freq: 60, density: 1.0, isHiDPI: false),
+            DisplayMode(id: 3, width: 3440, height: 1440, freq: 100, density: 2.0, isHiDPI: true),
+            DisplayMode(id: 4, width: 3440, height: 1440, freq: 75, density: 2.0, isHiDPI: true),
+            DisplayMode(id: 5, width: 3440, height: 1440, freq: 60, density: 2.0, isHiDPI: true),
+            DisplayMode(id: 6, width: 3440, height: 1440, freq: 56, density: 2.0, isHiDPI: true)
+        ]
+
+        let catalog = ModeResolver.buildCatalog(rawModes: rawModes, currentModeID: 3)
+
+        #expect(catalog.availableRefreshRates.map(\.freq) == [100, 60])
+        #expect(!catalog.availableModes.contains(where: { $0.freq == 75 || $0.freq == 56 }))
+    }
+
     @Test("Вертикальные (портретные) мониторы 1080×1920 не отсекаются фильтром 1280px")
     func portraitDisplayModesAreIncluded() {
         let rawModes = [
@@ -152,45 +169,156 @@ struct ModeResolverTests {
         #expect(store.hasInstalledSystemOverride == false)
     }
 
-    @Test("Таймер безопасного отката запускается для непроверенного режима и поддерживает подтверждение/откат")
+    @Test("Таймер безопасного отката запускается для непроверенного режима и открывает/закрывает отдельный диалог")
     @MainActor
     func safetyRevertTimerConfirmAndRevert() {
         let mockClient = MockHardwareClient()
         let mockPrefs = MockPreferencesStore()
         let mockHotKeys = MockHotKeyService()
+        let mockPresenter = MockRevertPresenter()
         let store = DisplayStore(
             hardwareClient: mockClient,
             preferencesStore: mockPrefs,
             hotKeyService: mockHotKeys,
             virtualHiDPIService: MockVirtualHiDPIService(),
             overrideInstaller: MockOverrideInstaller(),
-            revertTimeoutSeconds: 10
+            revertTimeoutSeconds: 10,
+            revertPresenter: mockPresenter
         )
 
         #expect(store.currentMode?.id == 10)
         #expect(store.pendingRevertSeconds == nil)
+        #expect(mockPresenter.showCallCount == 0)
+        #expect(mockPresenter.dismissCallCount == 0)
 
+        // Переключаем на непроверенный режим — должен показаться диалог
         store.toggleHiDPI()
         #expect(store.currentMode?.id == 20)
         #expect(store.pendingRevertSeconds == 10)
         #expect(store.previousSafeMode?.id == 10)
+        #expect(mockPresenter.showCallCount == 1)
+        #expect(mockPresenter.dismissCallCount == 0)
 
+        // Откат по хоткею — диалог закрывается
         mockHotKeys.onAction?(.toggleHiDPIOrRevert)
         #expect(store.currentMode?.id == 10)
         #expect(store.pendingRevertSeconds == nil)
+        #expect(mockPresenter.dismissCallCount == 1)
 
+        // Снова переключаем — диалог открывается второй раз
         store.toggleHiDPI()
         #expect(store.pendingRevertSeconds == 10)
+        #expect(mockPresenter.showCallCount == 2)
+
+        // Подтверждение через диалог — режим сохраняется, диалог закрывается
         store.confirmPendingMode()
         #expect(store.pendingRevertSeconds == nil)
+        #expect(mockPresenter.dismissCallCount == 2)
 
+        // Теперь режим проверен — переключение обратно и снова на него не вызывает показ диалога
         store.toggleHiDPI()
         #expect(store.currentMode?.id == 10)
         #expect(store.pendingRevertSeconds == nil)
+        #expect(mockPresenter.showCallCount == 2)
 
         store.toggleHiDPI()
         #expect(store.currentMode?.id == 20)
         #expect(store.pendingRevertSeconds == nil)
+        #expect(mockPresenter.showCallCount == 2)
+    }
+
+    @Test("Переключение частоты обновления строго сохраняет геометрию и признак HiDPI")
+    @MainActor
+    func setRefreshRatePreservesGeometryAndHiDPI() {
+        let mockClient = MockHardwareClient()
+        let mockPrefs = MockPreferencesStore()
+        let store = DisplayStore(
+            hardwareClient: mockClient,
+            preferencesStore: mockPrefs,
+            hotKeyService: MockHotKeyService(),
+            virtualHiDPIService: MockVirtualHiDPIService(),
+            overrideInstaller: MockOverrideInstaller(),
+            revertTimeoutSeconds: 0
+        )
+
+        #expect(store.currentMode?.id == 10)
+        #expect(store.currentMode?.width == 1920)
+        #expect(store.currentMode?.height == 1080)
+        #expect(store.currentMode?.freq == 60)
+        #expect(store.isHiDPIActive == false)
+
+        // Переключаем частоту на 120Hz для текущего 1920x1080 Low-Res
+        store.setRefreshRate(120)
+        #expect(store.currentMode?.id == 11)
+        #expect(store.currentMode?.width == 1920)
+        #expect(store.currentMode?.height == 1080)
+        #expect(store.currentMode?.freq == 120)
+        #expect(store.isHiDPIActive == false)
+
+        // Переключаемся в HiDPI (20: 1920x1080 @ 60Hz)
+        store.setMode(DisplayMode(id: 20, width: 1920, height: 1080, freq: 60, density: 2.0, isHiDPI: true))
+        #expect(store.currentMode?.id == 20)
+        #expect(store.isHiDPIActive == true)
+
+        // Переключаем частоту в HiDPI на 120Hz
+        store.setRefreshRate(120)
+        #expect(store.currentMode?.id == 21)
+        #expect(store.currentMode?.width == 1920)
+        #expect(store.currentMode?.height == 1080)
+        #expect(store.currentMode?.freq == 120)
+        #expect(store.isHiDPIActive == true)
+    }
+
+    @Test("При alwaysConfirmModeChanges диалог подтверждения появляется при любом переключении частоты или разрешения")
+    @MainActor
+    func alwaysConfirmModeChangesShowsDialogEveryTime() {
+        let mockClient = MockHardwareClient()
+        let mockPrefs = MockPreferencesStore()
+        mockPrefs.alwaysConfirmModeChanges = true
+        let mockPresenter = MockRevertPresenter()
+        let store = DisplayStore(
+            hardwareClient: mockClient,
+            preferencesStore: mockPrefs,
+            hotKeyService: MockHotKeyService(),
+            virtualHiDPIService: MockVirtualHiDPIService(),
+            overrideInstaller: MockOverrideInstaller(),
+            revertTimeoutSeconds: 10,
+            revertPresenter: mockPresenter
+        )
+
+        #expect(mockPresenter.showCallCount == 0)
+
+        // 1. Переключение частоты
+        store.setRefreshRate(120)
+        #expect(store.currentMode?.freq == 120)
+        #expect(store.pendingRevertSeconds == 10)
+        #expect(mockPresenter.showCallCount == 1)
+
+        // Подтверждаем
+        store.confirmPendingMode()
+        #expect(store.pendingRevertSeconds == nil)
+        #expect(mockPresenter.dismissCallCount == 1)
+
+        // 2. Переключение обратно на 60Hz — снова выводится диалог
+        store.setRefreshRate(60)
+        #expect(store.currentMode?.freq == 60)
+        #expect(store.pendingRevertSeconds == 10)
+        #expect(mockPresenter.showCallCount == 2)
+
+        // Откатываем через revertPendingMode
+        store.revertPendingMode()
+        #expect(store.currentMode?.freq == 120)
+        #expect(store.pendingRevertSeconds == nil)
+        #expect(mockPresenter.dismissCallCount == 2)
+
+        // 3. Переключение разрешения в HiDPI
+        store.toggleHiDPI()
+        #expect(store.isHiDPIActive == true)
+        #expect(store.pendingRevertSeconds == 10)
+        #expect(mockPresenter.showCallCount == 3)
+
+        store.confirmPendingMode()
+        #expect(mockPresenter.dismissCallCount == 3)
     }
 
     @Test("Избранные пресеты и циклическое переключение по хоткею ⌃⌥⌘F")
@@ -271,7 +399,9 @@ private final class MockHardwareClient: DisplayHardwareClientProtocol {
     func allModes(for displayID: CGDirectDisplayID) -> [DisplayMode] {
         [
             DisplayMode(id: 10, width: 1920, height: 1080, freq: 60, density: 1.0, isHiDPI: false),
-            DisplayMode(id: 20, width: 1920, height: 1080, freq: 60, density: 2.0, isHiDPI: true)
+            DisplayMode(id: 11, width: 1920, height: 1080, freq: 120, density: 1.0, isHiDPI: false),
+            DisplayMode(id: 20, width: 1920, height: 1080, freq: 60, density: 2.0, isHiDPI: true),
+            DisplayMode(id: 21, width: 1920, height: 1080, freq: 120, density: 2.0, isHiDPI: true)
         ]
     }
 
@@ -292,6 +422,7 @@ private final class MockPreferencesStore: DisplayPreferencesStoreProtocol {
     var autoRestoreSavedMode: Bool = true
     var globalHotKeysEnabled: Bool = true
     var showAllResolutions: Bool = false
+    var alwaysConfirmModeChanges: Bool = false
 
     private var preferredModes: [String: ModeKey] = [:]
     private var favoriteModes: [String: [ModeKey]] = [:]
@@ -379,5 +510,19 @@ private final class MockOverrideInstaller: DisplayOverrideInstallerProtocol {
 
     func removeOverride(for device: DisplayDevice) throws {
         installed.remove(device.persistentIdentifier)
+    }
+}
+
+@MainActor
+private final class MockRevertPresenter: RevertDialogPresenter {
+    var showCallCount = 0
+    var dismissCallCount = 0
+
+    func showRevertDialog(store: DisplayStore) {
+        showCallCount += 1
+    }
+
+    func dismissRevertDialog() {
+        dismissCallCount += 1
     }
 }

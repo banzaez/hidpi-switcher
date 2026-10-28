@@ -29,24 +29,7 @@ struct MenuBarContentView: View {
             Divider()
         }
 
-        // 2. Таймер безопасного отката для нового (непроверенного) режима
-        if let seconds = displayStore.pendingRevertSeconds {
-            Text("⏱ Проверка сигнала: откат через \(seconds) сек")
-                .font(.caption)
-                .foregroundStyle(.orange)
-
-            Button("✓ Оставить этот режим") {
-                displayStore.confirmPendingMode()
-            }
-
-            Button("↩ Вернуть прежний режим (⌃⌥⌘H)") {
-                displayStore.revertPendingMode()
-            }
-
-            Divider()
-        }
-
-        // 3. Текущее состояние выбранного монитора
+        // 2. Текущее состояние выбранного монитора
         if let current = displayStore.currentMode {
             VStack(alignment: .leading, spacing: 2) {
                 if let curDevice = displayStore.selectedDevice {
@@ -104,13 +87,19 @@ struct MenuBarContentView: View {
         // 6. Отдельный переключатель частоты обновления (Hz) для текущего разрешения
         if displayStore.availableRefreshRates.count > 1,
            let current = displayStore.currentMode {
-            ModeMenu(
-                title: "Частота обновления: \(current.refreshRateTitle)",
-                modes: displayStore.availableRefreshRates,
-                currentID: current.id,
-                labelProvider: \.refreshRateTitle,
-                onSelect: displayStore.setMode
-            )
+            Menu("Частота обновления: \(current.refreshRateTitle)") {
+                ForEach(displayStore.availableRefreshRates) { mode in
+                    Button {
+                        displayStore.setRefreshRate(mode.freq)
+                    } label: {
+                        if mode.freq == current.freq {
+                            Text("✓ \(mode.refreshRateTitle)")
+                        } else {
+                            Text(mode.refreshRateTitle)
+                        }
+                    }
+                }
+            }
         }
 
         Divider()
@@ -119,7 +108,7 @@ struct MenuBarContentView: View {
         if !displayStore.favoriteModes.isEmpty {
             ForEach(displayStore.favoriteModes) { fav in
                 Button {
-                    displayStore.setMode(fav)
+                    displayStore.selectFavorite(fav)
                 } label: {
                     Text(fav.id == displayStore.currentMode?.id ? "✓ \(fav.favoriteTitle)" : fav.favoriteTitle)
                 }
@@ -181,6 +170,8 @@ struct MenuBarContentView: View {
             Toggle("Глобальные хоткеи (⌃⌥⌘H / ⌃⌥⌘F)", isOn: $displayStore.globalHotKeysEnabled)
 
             Toggle("Показывать разрешения < 1280px", isOn: $displayStore.showAllResolutions)
+
+            Toggle("Подтверждать смену режима диалогом", isOn: $displayStore.alwaysConfirmModeChanges)
         }
 
         Divider()
@@ -201,8 +192,16 @@ struct MenuBarContentView: View {
 
 @main
 struct HiDpiApp: App {
-    @State private var displayStore = DisplayStore()
+    @State private var displayStore: DisplayStore
     @State private var launchStore = LaunchAtLoginStore()
+    private let revertPresenter: RevertConfirmationPresenter
+
+    init() {
+        let presenter = RevertConfirmationPresenter()
+        self.revertPresenter = presenter
+        let store = DisplayStore(revertPresenter: presenter)
+        _displayStore = State(initialValue: store)
+    }
 
     private var statusIcon: String {
         if displayStore.pendingRevertSeconds != nil {

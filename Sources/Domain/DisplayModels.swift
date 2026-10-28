@@ -8,6 +8,7 @@ public struct DisplayDevice: Identifiable, Hashable, Sendable {
     public let isBuiltin: Bool
     public let vendorNumber: UInt32
     public let modelNumber: UInt32
+    public let serialNumber: UInt32
 
     public init(
         id: CGDirectDisplayID,
@@ -15,7 +16,8 @@ public struct DisplayDevice: Identifiable, Hashable, Sendable {
         isMain: Bool,
         isBuiltin: Bool,
         vendorNumber: UInt32 = 0,
-        modelNumber: UInt32 = 0
+        modelNumber: UInt32 = 0,
+        serialNumber: UInt32 = 0
     ) {
         self.id = id
         self.name = name
@@ -23,11 +25,18 @@ public struct DisplayDevice: Identifiable, Hashable, Sendable {
         self.isBuiltin = isBuiltin
         self.vendorNumber = vendorNumber
         self.modelNumber = modelNumber
+        self.serialNumber = serialNumber
     }
 
     /// Стабильный идентификатор модели монитора для сохранения настроек между сессиями.
     public var persistentIdentifier: String {
-        "\(vendorNumber)-\(modelNumber)-\(isBuiltin ? 1 : 0)-\(id)"
+        if isBuiltin {
+            return "builtin"
+        }
+        if serialNumber != 0 {
+            return "\(vendorNumber)-\(modelNumber)-\(serialNumber)"
+        }
+        return "\(vendorNumber)-\(modelNumber)"
     }
 }
 

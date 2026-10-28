@@ -6,6 +6,13 @@ import os
 
 private let log = Logger(subsystem: "com.local.HiDpiSwitcher", category: "DisplayStore")
 
+/// Презентер системного диалогового окна подтверждения смены режима.
+@MainActor
+public protocol RevertDialogPresenter: AnyObject {
+    func showRevertDialog(store: DisplayStore)
+    func dismissRevertDialog()
+}
+
 /// Реактивное хранилище состояния дисплеев, частот, избранных пресетов, виртуального 2K/Ultrawide HiDPI и безопасного отката (Swift 6 / 2026).
 @Observable
 @MainActor
@@ -25,6 +32,10 @@ public final class DisplayStore {
     /// Оставшееся время (в секундах) до автоматического отката непроверенного видеорежима.
     public private(set) var pendingRevertSeconds: Int?
     public private(set) var previousSafeMode: DisplayMode?
+    public let revertTimeoutSeconds: Int
+
+    @ObservationIgnored
+    public var revertPresenter: (any RevertDialogPresenter)?
 
     public var autoRestoreSavedMode: Bool {
         didSet {
@@ -43,6 +54,12 @@ public final class DisplayStore {
         didSet {
             preferencesStore.showAllResolutions = showAllResolutions
             refreshModes()
+        }
+    }
+
+    public var alwaysConfirmModeChanges: Bool {
+        didSet {
+            preferencesStore.alwaysConfirmModeChanges = alwaysConfirmModeChanges
         }
     }
 
@@ -77,8 +94,9 @@ public final class DisplayStore {
     private var revertTimerTask: Task<Void, Never>?
     @ObservationIgnored
     private var restoredDisplayIDs: Set<String> = []
+    /// Частота, явно выбранная пользователем; применяется при смене разрешения, если она доступна.
     @ObservationIgnored
-    private let revertTimeoutSeconds: Int
+    private var preferredRefreshRate: Int?
 
     public init(
         hardwareClient: DisplayHardwareClientProtocol = LiveDisplayHardwareClient(),
@@ -86,7 +104,8 @@ public final class DisplayStore {
         hotKeyService: GlobalHotKeyServiceProtocol = CarbonGlobalHotKeyService(),
         virtualHiDPIService: VirtualHiDPIServiceProtocol = LiveVirtualHiDPIService(),
         overrideInstaller: DisplayOverrideInstallerProtocol = SystemDisplayOverrideInstaller(),
-        revertTimeoutSeconds: Int = 10
+        revertTimeoutSeconds: Int = 10,
+        revertPresenter: (any RevertDialogPresenter)? = nil
     ) {
         self.hardwareClient = hardwareClient
         self.preferencesStore = preferencesStore
@@ -94,10 +113,12 @@ public final class DisplayStore {
         self.virtualHiDPIService = virtualHiDPIService
         self.overrideInstaller = overrideInstaller
         self.revertTimeoutSeconds = revertTimeoutSeconds
+        self.revertPresenter = revertPresenter
         self.selectedDisplayID = preferencesStore.preferredDisplayID ?? CGMainDisplayID()
         self.autoRestoreSavedMode = preferencesStore.autoRestoreSavedMode
         self.globalHotKeysEnabled = preferencesStore.globalHotKeysEnabled
         self.showAllResolutions = preferencesStore.showAllResolutions
+        self.alwaysConfirmModeChanges = preferencesStore.alwaysConfirmModeChanges
 
         setupHotKeys()
         refreshDisplays()
@@ -150,6 +171,7 @@ public final class DisplayStore {
     public func selectDisplay(_ id: CGDirectDisplayID) {
         guard selectedDisplayID != id else { return }
         cancelRevertTimer(confirm: true)
+        preferredRefreshRate = nil
         selectedDisplayID = id
         preferencesStore.preferredDisplayID = id
         lastError = nil
@@ -191,8 +213,12 @@ public final class DisplayStore {
         let catalog = ModeResolver.buildCatalog(
             rawModes: rawModes,
             currentModeID: currentID,
-            minimumLongEdge: minEdge
+            minimumLongEdge: minEdge,
+            preferredFrequency: preferredRefreshRate
         )
+        if preferredRefreshRate == nil {
+            preferredRefreshRate = catalog.currentMode?.freq
+        }
 
         if availableModes != catalog.availableModes {
             availableModes = catalog.availableModes
@@ -283,6 +309,33 @@ public final class DisplayStore {
         setMode(target)
     }
 
+    /// Переключает частоту обновления (Hz) строго для ТЕКУЩЕГО разрешения и типа (HiDPI / Low-Res).
+    public func setRefreshRate(_ targetFreq: Int) {
+        guard let current = currentMode else { return }
+        guard current.freq != targetFreq else { return }
+
+        // Ищем режим строго с такой же геометрией и плотностью (HiDPI / 1x)
+        guard let targetMode = availableModes.first(where: {
+            $0.width == current.width &&
+            $0.height == current.height &&
+            $0.isHiDPI == current.isHiDPI &&
+            $0.freq == targetFreq
+        }) else {
+            lastError = "Частота \(targetFreq) Hz недоступна для разрешения \(current.width)×\(current.height)"
+            log.error("setRefreshRate: frequency \(targetFreq)Hz not found for \(current.width)x\(current.height) (HiDPI: \(current.isHiDPI))")
+            return
+        }
+
+        preferredRefreshRate = targetFreq
+        setMode(targetMode)
+    }
+
+    /// Применяет избранный пресет; его частота становится предпочтительной.
+    public func selectFavorite(_ mode: DisplayMode) {
+        preferredRefreshRate = mode.freq
+        setMode(mode)
+    }
+
     public func setMode(_ mode: DisplayMode) {
         guard mode.id != currentMode?.id else { return }
         let previous = currentMode
@@ -301,12 +354,14 @@ public final class DisplayStore {
         if let device = selectedDevice {
             let modeKey = ModeKey(mode: mode)
             let isVerified = preferencesStore.verifiedModeKeys(for: device).contains(modeKey)
+            let shouldConfirm = alwaysConfirmModeChanges || !isVerified
 
-            if isVerified || revertTimeoutSeconds <= 0 {
+            if shouldConfirm && revertTimeoutSeconds > 0, let previous {
+                startRevertTimer(from: previous, to: mode, on: device)
+            } else {
                 cancelRevertTimer(confirm: false)
                 preferencesStore.setPreferredModeKey(modeKey, for: device)
-            } else if let previous {
-                startRevertTimer(from: previous, to: mode, on: device)
+                preferencesStore.addVerifiedModeKey(modeKey, for: device)
             }
         }
 
@@ -323,6 +378,7 @@ public final class DisplayStore {
             return
         }
         cancelRevertTimer(confirm: false)
+        preferredRefreshRate = safeMode.freq
         _ = hardwareClient.setDisplayMode(safeMode.id, for: selectedDisplayID)
         refreshModes()
     }
@@ -333,6 +389,7 @@ public final class DisplayStore {
             previousSafeMode = safeMode
         }
         pendingRevertSeconds = revertTimeoutSeconds
+        revertPresenter?.showRevertDialog(store: self)
 
         let seconds = revertTimeoutSeconds
         revertTimerTask = Task { [weak self] in
@@ -359,6 +416,7 @@ public final class DisplayStore {
         }
         pendingRevertSeconds = nil
         previousSafeMode = nil
+        revertPresenter?.dismissRevertDialog()
     }
 
     // MARK: - Избранные пресеты (Favorites)
@@ -383,7 +441,7 @@ public final class DisplayStore {
         guard let next = ModeResolver.nextFavoriteMode(from: currentMode, favorites: favKeys, in: availableModes) else {
             return
         }
-        setMode(next)
+        selectFavorite(next)
     }
 
     // MARK: - Разблокировка 2K / QHD (2560×1440) и Ultrawide (3440×1440) на Apple Silicon

@@ -55,7 +55,8 @@ public struct LiveDisplayHardwareClient: DisplayHardwareClientProtocol {
                 isMain: CGDisplayIsMain(displayID) != 0,
                 isBuiltin: isBuiltin,
                 vendorNumber: CGDisplayVendorNumber(displayID),
-                modelNumber: CGDisplayModelNumber(displayID)
+                modelNumber: CGDisplayModelNumber(displayID),
+                serialNumber: CGDisplaySerialNumber(displayID)
             )
         }
     }

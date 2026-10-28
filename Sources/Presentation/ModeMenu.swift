@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Подменю со списком разрешений или частот (с нативной системной галочкой macOS через `Picker`).
+/// Подменю со списком разрешений или частот (с нативной системной галочкой macOS).
 struct ModeMenu: View {
     let title: String
     let modes: [DisplayMode]
@@ -8,27 +8,20 @@ struct ModeMenu: View {
     var labelProvider: (DisplayMode) -> String = \.menuTitle
     let onSelect: (DisplayMode) -> Void
 
-    private var selectionBinding: Binding<Int?> {
-        Binding(
-            get: { currentID },
-            set: { newID in
-                guard let newID, let selected = modes.first(where: { $0.id == newID }) else { return }
-                onSelect(selected)
-            }
-        )
-    }
-
     var body: some View {
         if !modes.isEmpty {
             Menu(title) {
-                Picker(title, selection: selectionBinding) {
-                    ForEach(modes) { mode in
-                        Text(labelProvider(mode))
-                            .tag(Optional(mode.id))
+                ForEach(modes) { mode in
+                    Button {
+                        onSelect(mode)
+                    } label: {
+                        if mode.id == currentID {
+                            Text("✓ \(labelProvider(mode))")
+                        } else {
+                            Text(labelProvider(mode))
+                        }
                     }
                 }
-                .pickerStyle(.inline)
-                .labelsHidden()
             }
         }
     }

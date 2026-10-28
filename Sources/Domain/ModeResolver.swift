@@ -9,8 +9,13 @@ public enum ModeResolver {
     public static func buildCatalog(
         rawModes: [DisplayMode],
         currentModeID: Int,
-        minimumLongEdge: Int = defaultMinimumLongEdge
+        minimumLongEdge: Int = defaultMinimumLongEdge,
+        preferredFrequency: Int? = nil
     ) -> ModeCatalog {
+        // Отбрасываем «призрачные» частоты, которых нет у нативного сигнала панели:
+        // такие режимы система перечисляет, но выводят они обрезанную картинку.
+        let rawModes = filterByNativeTimings(rawModes, currentModeID: currentModeID)
+
         var uniqueModes: [DisplayMode] = []
         uniqueModes.reserveCapacity(rawModes.count)
 
@@ -54,7 +59,8 @@ public enum ModeResolver {
         // 1) активный режим (если это текущее разрешение),
         // 2) режим с частотой текущего режима (если доступен),
         // 3) режим с максимальной частотой (первый в отсортированном списке).
-        let preferredFreq = current?.freq
+        // Явно выбранная пользователем частота важнее текущей (иначе она «дрейфует» при смене разрешений)
+        let preferredFreq = preferredFrequency ?? current?.freq
         var groupedByResolution: [ResolutionKey: DisplayMode] = [:]
         var orderedResolutionKeys: [ResolutionKey] = []
 
@@ -108,6 +114,23 @@ public enum ModeResolver {
             availableRefreshRates: refreshRates,
             currentMode: current
         )
+    }
+
+    /// Частоты нативного сигнала: частоты 1x-режимов с наибольшей площадью (физическое разрешение панели).
+    public static func nativeRefreshRates(in modes: [DisplayMode]) -> Set<Int> {
+        let standard = modes.filter { !$0.isHiDPI }
+        guard let maxArea = standard.map(\.area).max() else { return [] }
+        return Set(standard.filter { $0.area == maxArea && $0.freq > 0 }.map(\.freq))
+    }
+
+    /// Оставляет только режимы с частотой из нативных таймингов панели (текущий режим сохраняется всегда).
+    public static func filterByNativeTimings(
+        _ modes: [DisplayMode],
+        currentModeID: Int
+    ) -> [DisplayMode] {
+        let native = nativeRefreshRates(in: modes)
+        guard !native.isEmpty else { return modes }
+        return modes.filter { $0.id == currentModeID || $0.freq == 0 || native.contains($0.freq) }
     }
 
     /// Находит конкретный режим в каталоге по сохранённому ключу `ModeKey`.
