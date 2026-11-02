@@ -38,6 +38,12 @@ public final class UserDefaultsDisplayPreferencesStore: DisplayPreferencesStoreP
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
+    // In-memory кэш для устранения повторного JSON-декодирования из UserDefaults при рендеринге UI и проверках
+    private var preferredModeCache: [String: ModeKey] = [:]
+    private var unloadedPreferredModeIDs: Set<String> = []
+    private var favoriteModesCache: [String: [ModeKey]] = [:]
+    private var verifiedModesCache: [String: Set<ModeKey>] = [:]
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
     }
@@ -97,49 +103,83 @@ public final class UserDefaultsDisplayPreferencesStore: DisplayPreferencesStoreP
     }
 
     public func preferredModeKey(for display: DisplayDevice) -> ModeKey? {
-        let storageKey = Keys.preferredModesPrefix + display.persistentIdentifier
-        guard let data = defaults.data(forKey: storageKey) else { return nil }
-        return try? decoder.decode(ModeKey.self, from: data)
+        let pid = display.persistentIdentifier
+        if let cached = preferredModeCache[pid] {
+            return cached
+        }
+        if unloadedPreferredModeIDs.contains(pid) {
+            return nil
+        }
+        let storageKey = Keys.preferredModesPrefix + pid
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? decoder.decode(ModeKey.self, from: data) else {
+            unloadedPreferredModeIDs.insert(pid)
+            return nil
+        }
+        preferredModeCache[pid] = decoded
+        return decoded
     }
 
     public func setPreferredModeKey(_ key: ModeKey?, for display: DisplayDevice) {
-        let storageKey = Keys.preferredModesPrefix + display.persistentIdentifier
+        let pid = display.persistentIdentifier
+        let storageKey = Keys.preferredModesPrefix + pid
         if let key, let data = try? encoder.encode(key) {
+            preferredModeCache[pid] = key
+            unloadedPreferredModeIDs.remove(pid)
             defaults.set(data, forKey: storageKey)
         } else {
+            preferredModeCache.removeValue(forKey: pid)
+            unloadedPreferredModeIDs.insert(pid)
             defaults.removeObject(forKey: storageKey)
         }
     }
 
     public func favoriteModeKeys(for display: DisplayDevice) -> [ModeKey] {
-        let storageKey = Keys.favoriteModesPrefix + display.persistentIdentifier
+        let pid = display.persistentIdentifier
+        if let cached = favoriteModesCache[pid] {
+            return cached
+        }
+        let storageKey = Keys.favoriteModesPrefix + pid
         guard let data = defaults.data(forKey: storageKey),
               let keys = try? decoder.decode([ModeKey].self, from: data) else {
+            favoriteModesCache[pid] = []
             return []
         }
+        favoriteModesCache[pid] = keys
         return keys
     }
 
     public func setFavoriteModeKeys(_ keys: [ModeKey], for display: DisplayDevice) {
-        let storageKey = Keys.favoriteModesPrefix + display.persistentIdentifier
+        let pid = display.persistentIdentifier
+        favoriteModesCache[pid] = keys
+        let storageKey = Keys.favoriteModesPrefix + pid
         if let data = try? encoder.encode(keys) {
             defaults.set(data, forKey: storageKey)
         }
     }
 
     public func verifiedModeKeys(for display: DisplayDevice) -> Set<ModeKey> {
-        let storageKey = Keys.verifiedModesPrefix + display.persistentIdentifier
+        let pid = display.persistentIdentifier
+        if let cached = verifiedModesCache[pid] {
+            return cached
+        }
+        let storageKey = Keys.verifiedModesPrefix + pid
         guard let data = defaults.data(forKey: storageKey),
               let keys = try? decoder.decode([ModeKey].self, from: data) else {
+            verifiedModesCache[pid] = []
             return []
         }
-        return Set(keys)
+        let set = Set(keys)
+        verifiedModesCache[pid] = set
+        return set
     }
 
     public func addVerifiedModeKey(_ key: ModeKey, for display: DisplayDevice) {
+        let pid = display.persistentIdentifier
         var current = verifiedModeKeys(for: display)
         guard current.insert(key).inserted else { return }
-        let storageKey = Keys.verifiedModesPrefix + display.persistentIdentifier
+        verifiedModesCache[pid] = current
+        let storageKey = Keys.verifiedModesPrefix + pid
         if let data = try? encoder.encode(Array(current)) {
             defaults.set(data, forKey: storageKey)
         }

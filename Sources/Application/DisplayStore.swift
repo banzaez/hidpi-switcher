@@ -28,6 +28,7 @@ public final class DisplayStore {
     public private(set) var isHiDPIActive: Bool = false
     public private(set) var isVirtualHiDPIActive: Bool = false
     public private(set) var hasInstalledSystemOverride: Bool = false
+    public private(set) var isInstallingOverride: Bool = false
 
     /// Оставшееся время (в секундах) до автоматического отката непроверенного видеорежима.
     public private(set) var pendingRevertSeconds: Int?
@@ -71,9 +72,9 @@ public final class DisplayStore {
     }
 
     public var isCurrentModeFavorite: Bool {
-        guard let currentMode, let selectedDevice else { return false }
+        guard let currentMode else { return false }
         let key = ModeKey(mode: currentMode)
-        return preferencesStore.favoriteModeKeys(for: selectedDevice).contains(key)
+        return favoriteModes.contains { ModeKey(mode: $0) == key }
     }
 
     @ObservationIgnored
@@ -97,6 +98,9 @@ public final class DisplayStore {
     /// Частота, явно выбранная пользователем; применяется при смене разрешения, если она доступна.
     @ObservationIgnored
     private var preferredRefreshRate: Int?
+    /// Кэш сырых видеорежимов текущего монитора для устранения повторных CGS-вызовов при переключении режима/фильтра.
+    @ObservationIgnored
+    private var cachedRawModes: (displayID: CGDirectDisplayID, modes: [DisplayMode])?
 
     public init(
         hardwareClient: DisplayHardwareClientProtocol = LiveDisplayHardwareClient(),
@@ -172,6 +176,7 @@ public final class DisplayStore {
         guard selectedDisplayID != id else { return }
         cancelRevertTimer(confirm: true)
         preferredRefreshRate = nil
+        cachedRawModes = nil
         selectedDisplayID = id
         preferencesStore.preferredDisplayID = id
         lastError = nil
@@ -201,13 +206,23 @@ public final class DisplayStore {
             }
         }
 
-        refreshModes()
+        refreshModes(invalidateCache: true)
         restoreSavedModesIfNeeded(for: devices)
     }
 
-    public func refreshModes() {
+    public func refreshModes(invalidateCache: Bool = false) {
+        if invalidateCache {
+            cachedRawModes = nil
+        }
         let currentID = hardwareClient.currentModeID(for: selectedDisplayID)
-        let rawModes = hardwareClient.allModes(for: selectedDisplayID)
+        let rawModes: [DisplayMode]
+        if let cached = cachedRawModes, cached.displayID == selectedDisplayID {
+            rawModes = cached.modes
+        } else {
+            let fetched = hardwareClient.allModes(for: selectedDisplayID)
+            cachedRawModes = (selectedDisplayID, fetched)
+            rawModes = fetched
+        }
         let minEdge = showAllResolutions ? 0 : ModeResolver.defaultMinimumLongEdge
 
         let catalog = ModeResolver.buildCatalog(
@@ -448,7 +463,7 @@ public final class DisplayStore {
 
     /// Определяет нативное физическое разрешение выбранного монитора.
     private func nativeResolutionForSelectedDisplay() -> (width: Int, height: Int, freq: Double) {
-        let best1x = availableModes.first(where: { !$0.isHiDPI }) ?? currentMode
+        let best1x = availableModes.filter { !$0.isHiDPI }.max(by: { $0.area < $1.area }) ?? currentMode
         let width = best1x?.width ?? 2560
         let height = best1x?.height ?? 1440
         let freq = Double(currentMode?.freq ?? best1x?.freq ?? 60)
@@ -462,7 +477,9 @@ public final class DisplayStore {
         statusMessage = nil
 
         if virtualHiDPIService.isVirtualHiDPIActive(for: selectedDisplayID) {
-            virtualHiDPIService.disableVirtualHiDPI(for: selectedDisplayID)
+            if let physicalID = virtualHiDPIService.disableVirtualHiDPI(for: selectedDisplayID) {
+                selectedDisplayID = physicalID
+            }
             isVirtualHiDPIActive = false
             statusMessage = "Виртуальный HiDPI-буфер отключён"
             refreshDisplays()
@@ -486,19 +503,21 @@ public final class DisplayStore {
     }
 
     /// Устанавливает или удаляет системный профиль `scale-resolutions` в `/Library/Displays/Contents/Resources/Overrides`.
-    public func toggleSystemOverride() {
-        guard let device = selectedDevice else { return }
+    public func toggleSystemOverride() async {
+        guard let device = selectedDevice, !isInstallingOverride else { return }
+        isInstallingOverride = true
+        defer { isInstallingOverride = false }
         lastError = nil
         statusMessage = nil
 
         do {
             if overrideInstaller.isOverrideInstalled(for: device) {
-                try overrideInstaller.removeOverride(for: device)
+                try await overrideInstaller.removeOverride(for: device)
                 hasInstalledSystemOverride = false
                 statusMessage = "✓ Системный профиль удалён (переподключите экран)"
             } else {
                 let native = nativeResolutionForSelectedDisplay()
-                try overrideInstaller.installOverride(
+                try await overrideInstaller.installOverride(
                     for: device,
                     nativeWidth: native.width,
                     nativeHeight: native.height

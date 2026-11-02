@@ -53,7 +53,8 @@ public protocol VirtualHiDPIServiceProtocol: AnyObject {
         nativeHeight: Int,
         refreshRate: Double
     ) -> CGDirectDisplayID?
-    func disableVirtualHiDPI(for physicalDisplayID: CGDirectDisplayID)
+    @discardableResult
+    func disableVirtualHiDPI(for displayID: CGDirectDisplayID) -> CGDirectDisplayID?
     func disableAll()
 }
 
@@ -188,10 +189,11 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         return vDisplayID
     }
 
-    public func disableVirtualHiDPI(for displayID: CGDirectDisplayID) {
+    @discardableResult
+    public func disableVirtualHiDPI(for displayID: CGDirectDisplayID) -> CGDirectDisplayID? {
         let session = sessionsByPhysicalID[displayID]
             ?? sessionsByPhysicalID.values.first { $0.virtualDisplayID == displayID }
-        guard let session else { return }
+        guard let session else { return nil }
 
         var config: CGDisplayConfigRef?
         if CGBeginDisplayConfiguration(&config) == .success, let config {
@@ -201,6 +203,7 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
 
         sessionsByPhysicalID.removeValue(forKey: session.physicalDisplayID)
         log.notice("Виртуальный HiDPI-фреймбуфер отключён для монитора \(session.physicalDisplayID)")
+        return session.physicalDisplayID
     }
 
     public func disableAll() {

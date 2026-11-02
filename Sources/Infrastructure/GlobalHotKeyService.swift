@@ -21,14 +21,26 @@ public protocol GlobalHotKeyServiceProtocol: AnyObject {
 public final class CarbonGlobalHotKeyService: GlobalHotKeyServiceProtocol {
     public var onAction: (@MainActor (HotKeyAction) -> Void)?
 
-    private var eventHandlerRef: EventHandlerRef?
-    private var toggleHotKeyRef: EventHotKeyRef?
-    private var favoritesHotKeyRef: EventHotKeyRef?
+    private nonisolated(unsafe) var eventHandlerRef: EventHandlerRef?
+    private nonisolated(unsafe) var toggleHotKeyRef: EventHotKeyRef?
+    private nonisolated(unsafe) var favoritesHotKeyRef: EventHotKeyRef?
     private var isRegistered = false
 
     private nonisolated static let signature: OSType = 0x4844_5049 // 'HDPI'
 
     public init() {}
+
+    deinit {
+        if let ref = toggleHotKeyRef {
+            UnregisterEventHotKey(ref)
+        }
+        if let ref = favoritesHotKeyRef {
+            UnregisterEventHotKey(ref)
+        }
+        if let handler = eventHandlerRef {
+            RemoveEventHandler(handler)
+        }
+    }
 
     public func setEnabled(_ enabled: Bool) {
         if enabled {

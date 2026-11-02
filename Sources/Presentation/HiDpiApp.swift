@@ -152,8 +152,11 @@ struct MenuBarContentView: View {
             Button(displayStore.hasInstalledSystemOverride
                    ? "Удалить системный профиль Override..."
                    : "Установить системный профиль Override...") {
-                displayStore.toggleSystemOverride()
+                Task {
+                    await displayStore.toggleSystemOverride()
+                }
             }
+            .disabled(displayStore.isInstallingOverride)
         }
 
         Divider()
@@ -201,6 +204,16 @@ struct HiDpiApp: App {
         self.revertPresenter = presenter
         let store = DisplayStore(revertPresenter: presenter)
         _displayStore = State(initialValue: store)
+
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                store.cleanupOnTerminate()
+            }
+        }
     }
 
     private var statusIcon: String {

@@ -93,19 +93,19 @@ public enum CustomHiDPISpec {
             .sorted { $0.logicalWidth * $0.logicalHeight > $1.logicalWidth * $1.logicalHeight }
     }
 
-    /// Кодирует запись `scale-resolutions` (16 байт Big-Endian: width, height, scale=1, flags).
+    /// Кодирует запись `scale-resolutions` (16 байт Big-Endian: width, height, scale=1, flags) без аллокации промежуточного массива.
     public static func encodeScaleResolutionEntry(
         width: UInt32,
         height: UInt32,
         hiDPIFlag: UInt32 = 0x0020_0000
     ) -> Data {
-        var words: [UInt32] = [
+        let words: (UInt32, UInt32, UInt32, UInt32) = (
             width.bigEndian,
             height.bigEndian,
             UInt32(1).bigEndian,
             hiDPIFlag.bigEndian
-        ]
-        return Data(bytes: &words, count: words.count * MemoryLayout<UInt32>.size)
+        )
+        return withUnsafeBytes(of: words) { Data($0) }
     }
 
     /// Формирует словарь Override Plist для сохранения в `/Library/Displays/Contents/Resources/Overrides/...`.

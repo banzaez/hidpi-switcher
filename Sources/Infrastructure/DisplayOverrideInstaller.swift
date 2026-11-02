@@ -7,8 +7,8 @@ private let log = Logger(subsystem: "com.local.HiDpiSwitcher", category: "Displa
 @MainActor
 public protocol DisplayOverrideInstallerProtocol: AnyObject {
     func isOverrideInstalled(for device: DisplayDevice) -> Bool
-    func installOverride(for device: DisplayDevice, nativeWidth: Int, nativeHeight: Int) throws
-    func removeOverride(for device: DisplayDevice) throws
+    func installOverride(for device: DisplayDevice, nativeWidth: Int, nativeHeight: Int) async throws
+    func removeOverride(for device: DisplayDevice) async throws
 }
 
 public enum DisplayOverrideError: LocalizedError {
@@ -43,12 +43,12 @@ public final class SystemDisplayOverrideInstaller: DisplayOverrideInstallerProto
         return FileManager.default.fileExists(atPath: path)
     }
 
-    public func installOverride(for device: DisplayDevice, nativeWidth: Int, nativeHeight: Int) throws {
+    public func installOverride(for device: DisplayDevice, nativeWidth: Int, nativeHeight: Int) async throws {
         let resolutions = CustomHiDPISpec.recommendedResolutions(
             nativeWidth: nativeWidth,
             nativeHeight: nativeHeight
         )
-        let plistDict = CustomHiDPISpec.buildOverridePlistPlistSafe(device: device, resolutions: resolutions)
+        let plistDict = CustomHiDPISpec.buildOverridePlistDictionary(device: device, resolutions: resolutions)
         let data = try PropertyListSerialization.data(
             fromPropertyList: plistDict,
             format: .xml,
@@ -68,11 +68,11 @@ public final class SystemDisplayOverrideInstaller: DisplayOverrideInstallerProto
         let targetDir = (targetPath as NSString).deletingLastPathComponent
 
         let command = "mkdir -p '\(Self.shellEscape(targetDir))' && cp '\(Self.shellEscape(tempURL.path))' '\(Self.shellEscape(targetPath))' && chmod 644 '\(Self.shellEscape(targetPath))'"
-        try runWithAdminPrivileges(command)
+        try await Self.runWithAdminPrivileges(command)
         log.notice("Установлен системный HiDPI Override: \(targetPath)")
     }
 
-    public func removeOverride(for device: DisplayDevice) throws {
+    public func removeOverride(for device: DisplayDevice) async throws {
         let targetPath = CustomHiDPISpec.overrideFilePath(
             vendorID: device.vendorNumber,
             productID: device.modelNumber,
@@ -81,43 +81,48 @@ public final class SystemDisplayOverrideInstaller: DisplayOverrideInstallerProto
         guard FileManager.default.fileExists(atPath: targetPath) else { return }
 
         let command = "rm -f '\(Self.shellEscape(targetPath))'"
-        try runWithAdminPrivileges(command)
+        try await Self.runWithAdminPrivileges(command)
         log.notice("Удалён системный HiDPI Override: \(targetPath)")
     }
 
-    private func runWithAdminPrivileges(_ shellCommand: String) throws {
+    /// Неблокирующий запуск `osascript` с правами администратора вне `@MainActor`.
+    private nonisolated static func runWithAdminPrivileges(_ shellCommand: String) async throws {
         let escapedForAppleScript = shellCommand
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
 
         let script = "do shell script \"\(escapedForAppleScript)\" with administrator privileges"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
 
-        let errPipe = Pipe()
-        process.standardError = errPipe
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
 
-        try process.run()
-        process.waitUntilExit()
+            let errPipe = Pipe()
+            process.standardError = errPipe
 
-        if process.terminationStatus != 0 {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let errText = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Код \(process.terminationStatus)"
-            throw DisplayOverrideError.privilegedExecutionFailed(errText)
+            process.terminationHandler = { proc in
+                if proc.terminationStatus == 0 {
+                    continuation.resume()
+                } else {
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errText = String(data: errData, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        ?? "Код \(proc.terminationStatus)"
+                    continuation.resume(throwing: DisplayOverrideError.privilegedExecutionFailed(errText))
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                continuation.resume(throwing: error)
+            }
         }
     }
 
-    private static func shellEscape(_ value: String) -> String {
+    private nonisolated static func shellEscape(_ value: String) -> String {
         value.replacingOccurrences(of: "'", with: "'\\''")
-    }
-}
-
-extension CustomHiDPISpec {
-    static func buildOverridePlistPlistSafe(
-        device: DisplayDevice,
-        resolutions: [HiDPIResolutionPair]
-    ) -> [String: Any] {
-        buildOverridePlistDictionary(device: device, resolutions: resolutions)
     }
 }

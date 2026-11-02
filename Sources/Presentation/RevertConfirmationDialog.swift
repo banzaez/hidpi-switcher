@@ -156,17 +156,18 @@ public final class RevertConfirmationPresenter: NSObject, RevertDialogPresenter,
     }
 
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // При нажатии крестика закрытия окна — безопасный откат
+        // При нажатии крестика закрытия окна — безопасный откат (который сам закроет панель через dismissRevertDialog)
         currentStore?.revertPendingMode()
-        return true
+        return false
     }
 
     private func updatePanelPosition(for displayID: CGDirectDisplayID) {
         guard let panel else { return }
 
         // Центрируем диалог на целевом экране, на котором тестируется разрешение
+        let screenKey = NSDeviceDescriptionKey("NSScreenNumber")
         let targetScreen = NSScreen.screens.first { screen in
-            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            guard let screenNumber = (screen.deviceDescription[screenKey] as? NSNumber)?.uint32Value else {
                 return false
             }
             return screenNumber == displayID

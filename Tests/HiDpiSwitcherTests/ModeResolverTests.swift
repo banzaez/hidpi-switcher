@@ -138,7 +138,7 @@ struct ModeResolverTests {
 
     @Test("Виртуальный HiDPI-фреймбуфер (2K/Ultrawide) и системный Override переключаются через DisplayStore")
     @MainActor
-    func virtualHiDPIAndSystemOverrideToggle() {
+    func virtualHiDPIAndSystemOverrideToggle() async {
         let mockClient = MockHardwareClient()
         let mockPrefs = MockPreferencesStore()
         let mockHotKeys = MockHotKeyService()
@@ -161,11 +161,12 @@ struct ModeResolverTests {
 
         store.toggleVirtualHiDPI()
         #expect(store.isVirtualHiDPIActive == false)
+        #expect(store.selectedDisplayID == 2)
 
         #expect(store.hasInstalledSystemOverride == false)
-        store.toggleSystemOverride()
+        await store.toggleSystemOverride()
         #expect(store.hasInstalledSystemOverride == true)
-        store.toggleSystemOverride()
+        await store.toggleSystemOverride()
         #expect(store.hasInstalledSystemOverride == false)
     }
 
@@ -376,6 +377,33 @@ struct ModeResolverTests {
         #expect(store.isHiDPIActive == true)
         #expect(store.pendingRevertSeconds == nil)
     }
+
+    @Test("Кэширование сырых режимов устраняет повторные вызовы allModes при переключении режима и фильтра")
+    @MainActor
+    func rawModesCacheAvoidsRedundantHardwareQueries() {
+        let mockClient = MockHardwareClient()
+        let store = DisplayStore(
+            hardwareClient: mockClient,
+            preferencesStore: MockPreferencesStore(),
+            hotKeyService: MockHotKeyService(),
+            virtualHiDPIService: MockVirtualHiDPIService(),
+            overrideInstaller: MockOverrideInstaller(),
+            revertTimeoutSeconds: 0
+        )
+
+        let initialCalls = mockClient.allModesCallCount
+        #expect(initialCalls == 1)
+
+        // Переключение режима и фильтра использует закэшированный список сырых режимов
+        store.toggleHiDPI()
+        store.setRefreshRate(120)
+        store.showAllResolutions = true
+        #expect(mockClient.allModesCallCount == initialCalls)
+
+        // Полное обновление списка экранов сбрасывает кэш
+        store.refreshDisplays()
+        #expect(mockClient.allModesCallCount == initialCalls + 1)
+    }
 }
 
 // MARK: - Тестовые дублёры (Mocks)
@@ -384,6 +412,7 @@ struct ModeResolverTests {
 private final class MockHardwareClient: DisplayHardwareClientProtocol {
     var currentID: Int = 10
     var lastAppliedModeID: Int?
+    var allModesCallCount: Int = 0
 
     func activeDisplays() -> [DisplayDevice] {
         [
@@ -397,7 +426,8 @@ private final class MockHardwareClient: DisplayHardwareClientProtocol {
     }
 
     func allModes(for displayID: CGDirectDisplayID) -> [DisplayMode] {
-        [
+        allModesCallCount += 1
+        return [
             DisplayMode(id: 10, width: 1920, height: 1080, freq: 60, density: 1.0, isHiDPI: false),
             DisplayMode(id: 11, width: 1920, height: 1080, freq: 120, density: 1.0, isHiDPI: false),
             DisplayMode(id: 20, width: 1920, height: 1080, freq: 60, density: 2.0, isHiDPI: true),
@@ -487,8 +517,10 @@ private final class MockVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         return device.id
     }
 
-    func disableVirtualHiDPI(for physicalDisplayID: CGDirectDisplayID) {
-        activeIDs.remove(physicalDisplayID)
+    @discardableResult
+    func disableVirtualHiDPI(for physicalDisplayID: CGDirectDisplayID) -> CGDirectDisplayID? {
+        guard activeIDs.remove(physicalDisplayID) != nil else { return nil }
+        return physicalDisplayID
     }
 
     func disableAll() {
@@ -504,11 +536,11 @@ private final class MockOverrideInstaller: DisplayOverrideInstallerProtocol {
         installed.contains(device.persistentIdentifier)
     }
 
-    func installOverride(for device: DisplayDevice, nativeWidth: Int, nativeHeight: Int) throws {
+    func installOverride(for device: DisplayDevice, nativeWidth: Int, nativeHeight: Int) async throws {
         installed.insert(device.persistentIdentifier)
     }
 
-    func removeOverride(for device: DisplayDevice) throws {
+    func removeOverride(for device: DisplayDevice) async throws {
         installed.remove(device.persistentIdentifier)
     }
 }
