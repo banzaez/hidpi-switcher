@@ -47,22 +47,44 @@ private let log = Logger(subsystem: "com.local.HiDpiSwitcher", category: "Virtua
 public protocol VirtualHiDPIServiceProtocol: AnyObject {
     func isVirtualHiDPIActive(for physicalDisplayID: CGDirectDisplayID) -> Bool
     func virtualDisplayID(for physicalDisplayID: CGDirectDisplayID) -> CGDirectDisplayID?
+    func physicalDevice(for displayID: CGDirectDisplayID) -> DisplayDevice?
+    func nativeResolution(for displayID: CGDirectDisplayID) -> (width: Int, height: Int)?
     func enableVirtualHiDPI(
         for device: DisplayDevice,
         nativeWidth: Int,
         nativeHeight: Int,
-        refreshRate: Double
+        refreshRate: Double,
+        additionalRefreshRates: [Double]
     ) -> CGDirectDisplayID?
     @discardableResult
     func disableVirtualHiDPI(for displayID: CGDirectDisplayID) -> CGDirectDisplayID?
     func disableAll()
 }
 
+extension VirtualHiDPIServiceProtocol {
+    public func enableVirtualHiDPI(
+        for device: DisplayDevice,
+        nativeWidth: Int,
+        nativeHeight: Int,
+        refreshRate: Double
+    ) -> CGDirectDisplayID? {
+        enableVirtualHiDPI(
+            for: device,
+            nativeWidth: nativeWidth,
+            nativeHeight: nativeHeight,
+            refreshRate: refreshRate,
+            additionalRefreshRates: []
+        )
+    }
+}
+
 /// Реализация виртуального HiDPI-фреймбуфера поверх `CGVirtualDisplay` и аппаратного зеркалирования CoreGraphics.
 @MainActor
 public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
     private struct ActiveSession {
-        let physicalDisplayID: CGDirectDisplayID
+        let physicalDevice: DisplayDevice
+        let nativeWidth: Int
+        let nativeHeight: Int
         let virtualDisplayID: CGDirectDisplayID
         let virtualDisplayObject: AnyObject
     }
@@ -83,14 +105,35 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         sessionsByPhysicalID[physicalDisplayID]?.virtualDisplayID
     }
 
+    public func physicalDevice(for displayID: CGDirectDisplayID) -> DisplayDevice? {
+        if let session = sessionsByPhysicalID[displayID] {
+            return session.physicalDevice
+        }
+        return sessionsByPhysicalID.values.first { $0.virtualDisplayID == displayID }?.physicalDevice
+    }
+
+    public func nativeResolution(for displayID: CGDirectDisplayID) -> (width: Int, height: Int)? {
+        if let session = sessionsByPhysicalID[displayID] {
+            return (session.nativeWidth, session.nativeHeight)
+        }
+        if let session = sessionsByPhysicalID.values.first(where: { $0.virtualDisplayID == displayID }) {
+            return (session.nativeWidth, session.nativeHeight)
+        }
+        return nil
+    }
+
     public func enableVirtualHiDPI(
         for device: DisplayDevice,
         nativeWidth: Int,
         nativeHeight: Int,
-        refreshRate: Double
+        refreshRate: Double,
+        additionalRefreshRates: [Double] = []
     ) -> CGDirectDisplayID? {
         if let existing = sessionsByPhysicalID[device.id] {
             return existing.virtualDisplayID
+        }
+        if let existingByVirtual = sessionsByPhysicalID.values.first(where: { $0.virtualDisplayID == device.id }) {
+            return existingByVirtual.virtualDisplayID
         }
 
         guard let descClass = NSClassFromString("CGVirtualDisplayDescriptor"),
@@ -107,12 +150,23 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         )
         guard let maxRes = resolutions.first else { return nil }
 
+        let cleanName = device.name.replacingOccurrences(of: " (HiDPI)", with: "")
+        let cleanDevice = DisplayDevice(
+            id: device.id,
+            name: cleanName,
+            isMain: device.isMain,
+            isBuiltin: device.isBuiltin,
+            vendorNumber: device.vendorNumber,
+            modelNumber: device.modelNumber,
+            serialNumber: device.serialNumber
+        )
+
         let descType = unsafeBitCast(descClass, to: CGVirtualDisplayDescriptorObjC.Type.self)
         let descriptor = descType.init()
         descriptor.vendorID = 0xF0F0
         descriptor.productID = device.modelNumber &+ 0x1000
         descriptor.serialNum = device.id
-        descriptor.name = "\(device.name) (HiDPI)"
+        descriptor.name = "\(cleanName) (HiDPI)"
         descriptor.maxPixelsWide = UInt32(maxRes.backingWidth)
         descriptor.maxPixelsHigh = UInt32(maxRes.backingHeight)
 
@@ -128,25 +182,37 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         descriptor.greenPrimary = CGPoint(x: 0.3000, y: 0.6000)
         descriptor.bluePrimary = CGPoint(x: 0.1500, y: 0.0600)
         descriptor.whitePoint = CGPoint(x: 0.3127, y: 0.3290)
-        descriptor.setDispatchQueue(DispatchQueue.main)
+        // ВАЖНО: используем отдельную фоновую очередь, а не DispatchQueue.main!
+        // Если передать DispatchQueue.main, WindowServer блокируется при синхронном
+        // вызове CGCompleteDisplayConfiguration, что приводит к ошибке 1001 (kCGErrorIllegalArgument / timeout)
+        let virtualDisplayQueue = DispatchQueue(label: "com.local.HiDpiSwitcher.virtualDisplay", qos: .userInteractive)
+        descriptor.setDispatchQueue(virtualDisplayQueue)
 
         let modeType = unsafeBitCast(modeClass, to: CGVirtualDisplayModeObjC.Type.self)
-        let targetHz = refreshRate >= 30 ? refreshRate : 60.0
-        var virtualModes: [AnyObject] = []
+        let primaryHz = refreshRate >= 30 ? refreshRate : 60.0
+        var rates: [Double] = [primaryHz]
+        for rate in additionalRefreshRates where rate >= 30 && !rates.contains(rate) {
+            rates.append(rate)
+        }
 
-        for pair in resolutions {
-            let backingMode = modeType.init(
-                width: UInt32(pair.backingWidth),
-                height: UInt32(pair.backingHeight),
-                refreshRate: targetHz
-            )
-            let logicalMode = modeType.init(
-                width: UInt32(pair.logicalWidth),
-                height: UInt32(pair.logicalHeight),
-                refreshRate: targetHz
-            )
-            virtualModes.append(backingMode)
-            virtualModes.append(logicalMode)
+        var virtualModes: [AnyObject] = []
+        virtualModes.reserveCapacity(resolutions.count * rates.count * 2)
+
+        for hz in rates {
+            for pair in resolutions {
+                let backingMode = modeType.init(
+                    width: UInt32(pair.backingWidth),
+                    height: UInt32(pair.backingHeight),
+                    refreshRate: hz
+                )
+                let logicalMode = modeType.init(
+                    width: UInt32(pair.logicalWidth),
+                    height: UInt32(pair.logicalHeight),
+                    refreshRate: hz
+                )
+                virtualModes.append(backingMode)
+                virtualModes.append(logicalMode)
+            }
         }
 
         let settingsType = unsafeBitCast(settingsClass, to: CGVirtualDisplaySettingsObjC.Type.self)
@@ -181,7 +247,9 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         }
 
         sessionsByPhysicalID[device.id] = ActiveSession(
-            physicalDisplayID: device.id,
+            physicalDevice: cleanDevice,
+            nativeWidth: nativeWidth,
+            nativeHeight: nativeHeight,
             virtualDisplayID: vDisplayID,
             virtualDisplayObject: virtualDisplay
         )
@@ -195,15 +263,16 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
             ?? sessionsByPhysicalID.values.first { $0.virtualDisplayID == displayID }
         guard let session else { return nil }
 
+        let physicalID = session.physicalDevice.id
         var config: CGDisplayConfigRef?
         if CGBeginDisplayConfiguration(&config) == .success, let config {
-            CGConfigureDisplayMirrorOfDisplay(config, session.physicalDisplayID, kCGNullDirectDisplay)
+            CGConfigureDisplayMirrorOfDisplay(config, physicalID, kCGNullDirectDisplay)
             _ = CGCompleteDisplayConfiguration(config, .forSession)
         }
 
-        sessionsByPhysicalID.removeValue(forKey: session.physicalDisplayID)
-        log.notice("Виртуальный HiDPI-фреймбуфер отключён для монитора \(session.physicalDisplayID)")
-        return session.physicalDisplayID
+        sessionsByPhysicalID.removeValue(forKey: physicalID)
+        log.notice("Виртуальный HiDPI-фреймбуфер отключён для монитора \(physicalID)")
+        return physicalID
     }
 
     public func disableAll() {

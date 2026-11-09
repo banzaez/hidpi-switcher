@@ -32,8 +32,9 @@ struct MenuBarContentView: View {
         // 2. Текущее состояние выбранного монитора
         if let current = displayStore.currentMode {
             VStack(alignment: .leading, spacing: 2) {
-                if let curDevice = displayStore.selectedDevice {
-                    Text(curDevice.name)
+                if let curDevice = displayStore.effectivePhysicalDevice ?? displayStore.selectedDevice {
+                    let cleanName = curDevice.name.replacingOccurrences(of: " (HiDPI)", with: "")
+                    Text(displayStore.isVirtualHiDPIActive ? "\(cleanName) • Виртуальный HiDPI" : cleanName)
                         .font(.headline)
                 }
                 Text("Разрешение: \(current.width) × \(current.height)")
@@ -141,11 +142,24 @@ struct MenuBarContentView: View {
         )
 
         // 9. Разблокировка 2K / QHD (2560×1440) и Ultrawide (3440×1440) на Apple Silicon
-        Menu("Разблокировка 2K / Ultrawide HiDPI") {
-            Toggle("Виртуальный HiDPI-буфер (M1–M4, мгновенно)", isOn: Binding(
-                get: { displayStore.isVirtualHiDPIActive },
-                set: { _ in displayStore.toggleVirtualHiDPI() }
-            ))
+        Button(displayStore.isVirtualHiDPIActive
+               ? "✓ Виртуальный HiDPI-буфер (2K / Ultrawide)"
+               : "Виртуальный HiDPI-буфер (2K / Ultrawide)") {
+            // Выполняем асинхронно после закрытия меню macOS, чтобы WindowServer
+            // вышел из модального Menu Tracking Loop и не отклонял реконфигурацию экранов
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                displayStore.toggleVirtualHiDPI()
+            }
+        }
+
+        Menu("Системный профиль Override") {
+            Button(displayStore.isVirtualHiDPIActive
+                   ? "✓ Виртуальный HiDPI-буфер активен (отключить)"
+                   : "Включить виртуальный HiDPI-буфер (мгновенно)") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    displayStore.toggleVirtualHiDPI()
+                }
+            }
 
             Divider()
 

@@ -507,11 +507,20 @@ private final class MockVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         activeIDs.contains(physicalDisplayID) ? physicalDisplayID : nil
     }
 
+    func physicalDevice(for displayID: CGDirectDisplayID) -> DisplayDevice? {
+        nil
+    }
+
+    func nativeResolution(for displayID: CGDirectDisplayID) -> (width: Int, height: Int)? {
+        nil
+    }
+
     func enableVirtualHiDPI(
         for device: DisplayDevice,
         nativeWidth: Int,
         nativeHeight: Int,
-        refreshRate: Double
+        refreshRate: Double,
+        additionalRefreshRates: [Double] = []
     ) -> CGDirectDisplayID? {
         activeIDs.insert(device.id)
         return device.id

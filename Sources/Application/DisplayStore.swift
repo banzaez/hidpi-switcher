@@ -71,6 +71,11 @@ public final class DisplayStore {
         connectedDisplays.first(where: { $0.id == selectedDisplayID })
     }
 
+    /// Физическое устройство для выбранного экрана (возвращает исходный монитор, даже если активен виртуальный HiDPI-буфер).
+    public var effectivePhysicalDevice: DisplayDevice? {
+        virtualHiDPIService.physicalDevice(for: selectedDisplayID) ?? selectedDevice
+    }
+
     public var isCurrentModeFavorite: Bool {
         guard let currentMode else { return false }
         let key = ModeKey(mode: currentMode)
@@ -188,7 +193,9 @@ public final class DisplayStore {
         let devices = hardwareClient.activeDisplays()
         guard !devices.isEmpty else { return }
 
-        let activePersistentIDs = Set(devices.map(\.persistentIdentifier))
+        let activePersistentIDs = Set(devices.map {
+            (virtualHiDPIService.physicalDevice(for: $0.id) ?? $0).persistentIdentifier
+        })
         restoredDisplayIDs.formIntersection(activePersistentIDs)
 
         if devices != connectedDisplays {
@@ -224,12 +231,15 @@ public final class DisplayStore {
             rawModes = fetched
         }
         let minEdge = showAllResolutions ? 0 : ModeResolver.defaultMinimumLongEdge
+        let virtualNative = virtualHiDPIService.nativeResolution(for: selectedDisplayID)
 
         let catalog = ModeResolver.buildCatalog(
             rawModes: rawModes,
             currentModeID: currentID,
             minimumLongEdge: minEdge,
-            preferredFrequency: preferredRefreshRate
+            preferredFrequency: preferredRefreshRate,
+            maxLogicalWidth: virtualNative?.width,
+            maxLogicalHeight: virtualNative?.height
         )
         if preferredRefreshRate == nil {
             preferredRefreshRate = catalog.currentMode?.freq
@@ -256,7 +266,7 @@ public final class DisplayStore {
         }
 
         isVirtualHiDPIActive = virtualHiDPIService.isVirtualHiDPIActive(for: selectedDisplayID)
-        if let device = selectedDevice {
+        if let device = effectivePhysicalDevice {
             hasInstalledSystemOverride = overrideInstaller.isOverrideInstalled(for: device)
         } else {
             hasInstalledSystemOverride = false
@@ -264,7 +274,7 @@ public final class DisplayStore {
 
         if pendingRevertSeconds == nil,
            let current = catalog.currentMode,
-           let device = selectedDevice {
+           let device = effectivePhysicalDevice {
             preferencesStore.addVerifiedModeKey(ModeKey(mode: current), for: device)
         }
 
@@ -272,7 +282,7 @@ public final class DisplayStore {
     }
 
     private func refreshFavoritesList() {
-        guard let device = selectedDevice else {
+        guard let device = effectivePhysicalDevice else {
             favoriteModes = []
             return
         }
@@ -283,32 +293,72 @@ public final class DisplayStore {
         }
     }
 
-    /// Автоматическое применение сохранённого режима при старте приложения или подключении монитора.
+    /// Автоматическое применение сохранённого режима и виртуального HiDPI-буфера при старте приложения или подключении монитора.
     private func restoreSavedModesIfNeeded(for devices: [DisplayDevice]) {
         guard autoRestoreSavedMode, pendingRevertSeconds == nil else { return }
 
         for device in devices {
-            let pid = device.persistentIdentifier
+            let physical = virtualHiDPIService.physicalDevice(for: device.id) ?? device
+            let pid = physical.persistentIdentifier
             guard !restoredDisplayIDs.contains(pid) else { continue }
             restoredDisplayIDs.insert(pid)
 
-            guard let savedKey = preferencesStore.preferredModeKey(for: device) else { continue }
-            let modes = device.id == selectedDisplayID
+            var targetDisplayID = device.id
+
+            // Если для физического монитора был включён виртуальный HiDPI-буфер — поднимаем его автоматически
+            if !device.isBuiltin,
+               preferencesStore.isVirtualHiDPIEnabled(for: physical),
+               !virtualHiDPIService.isVirtualHiDPIActive(for: physical.id) {
+                let raw = hardwareClient.allModes(for: physical.id)
+                let best1x = raw.filter { !$0.isHiDPI }.max(by: { $0.area < $1.area }) ?? raw.first
+                let nativeW = best1x?.width ?? 2560
+                let nativeH = best1x?.height ?? 1440
+                let nativeRates = ModeResolver.nativeRefreshRates(in: raw).sorted(by: >).map(Double.init)
+                let primaryHz = nativeRates.first ?? Double(best1x?.freq ?? 60)
+
+                if let vID = virtualHiDPIService.enableVirtualHiDPI(
+                    for: physical,
+                    nativeWidth: nativeW,
+                    nativeHeight: nativeH,
+                    refreshRate: primaryHz > 0 ? primaryHz : 60.0,
+                    additionalRefreshRates: Array(nativeRates.dropFirst())
+                ) {
+                    if selectedDisplayID == physical.id {
+                        selectedDisplayID = vID
+                    }
+                    targetDisplayID = vID
+                    isVirtualHiDPIActive = true
+                    cachedRawModes = nil
+                    let updatedDevices = hardwareClient.activeDisplays()
+                    if !updatedDevices.isEmpty, updatedDevices != connectedDisplays {
+                        connectedDisplays = updatedDevices
+                    }
+                    if targetDisplayID == selectedDisplayID {
+                        refreshModes(invalidateCache: true)
+                    }
+                }
+            }
+
+            guard let savedKey = preferencesStore.preferredModeKey(for: physical) else { continue }
+            let vNative = virtualHiDPIService.nativeResolution(for: targetDisplayID)
+            let modes = targetDisplayID == selectedDisplayID
                 ? availableModes
                 : ModeResolver.buildCatalog(
-                    rawModes: hardwareClient.allModes(for: device.id),
-                    currentModeID: hardwareClient.currentModeID(for: device.id),
-                    minimumLongEdge: 0
+                    rawModes: hardwareClient.allModes(for: targetDisplayID),
+                    currentModeID: hardwareClient.currentModeID(for: targetDisplayID),
+                    minimumLongEdge: 0,
+                    maxLogicalWidth: vNative?.width,
+                    maxLogicalHeight: vNative?.height
                 ).availableModes
 
             guard let targetMode = ModeResolver.findMode(matching: savedKey, in: modes) else { continue }
-            let currentID = hardwareClient.currentModeID(for: device.id)
+            let currentID = hardwareClient.currentModeID(for: targetDisplayID)
             guard targetMode.id != currentID else { continue }
 
-            if hardwareClient.setDisplayMode(targetMode.id, for: device.id) {
-                preferencesStore.addVerifiedModeKey(ModeKey(mode: targetMode), for: device)
-                if device.id == selectedDisplayID {
-                    refreshModes()
+            if hardwareClient.setDisplayMode(targetMode.id, for: targetDisplayID) {
+                preferencesStore.addVerifiedModeKey(ModeKey(mode: targetMode), for: physical)
+                if targetDisplayID == selectedDisplayID {
+                    refreshModes(invalidateCache: true)
                 }
             }
         }
@@ -366,7 +416,7 @@ public final class DisplayStore {
         currentMode = mode
         isHiDPIActive = mode.isHiDPI
 
-        if let device = selectedDevice {
+        if let device = effectivePhysicalDevice {
             let modeKey = ModeKey(mode: mode)
             let isVerified = preferencesStore.verifiedModeKeys(for: device).contains(modeKey)
             let shouldConfirm = alwaysConfirmModeChanges || !isVerified
@@ -424,7 +474,7 @@ public final class DisplayStore {
     private func cancelRevertTimer(confirm: Bool) {
         revertTimerTask?.cancel()
         revertTimerTask = nil
-        if confirm, let currentMode, let device = selectedDevice {
+        if confirm, let currentMode, let device = effectivePhysicalDevice {
             let key = ModeKey(mode: currentMode)
             preferencesStore.addVerifiedModeKey(key, for: device)
             preferencesStore.setPreferredModeKey(key, for: device)
@@ -437,7 +487,7 @@ public final class DisplayStore {
     // MARK: - Избранные пресеты (Favorites)
 
     public func toggleCurrentModeFavorite() {
-        guard let currentMode, let device = selectedDevice else { return }
+        guard let currentMode, let device = effectivePhysicalDevice else { return }
         let key = ModeKey(mode: currentMode)
         var keys = preferencesStore.favoriteModeKeys(for: device)
         if let idx = keys.firstIndex(of: key) {
@@ -451,7 +501,7 @@ public final class DisplayStore {
     }
 
     public func cycleFavoriteModes() {
-        guard let device = selectedDevice else { return }
+        guard let device = effectivePhysicalDevice else { return }
         let favKeys = preferencesStore.favoriteModeKeys(for: device)
         guard let next = ModeResolver.nextFavoriteMode(from: currentMode, favorites: favKeys, in: availableModes) else {
             return
@@ -461,22 +511,32 @@ public final class DisplayStore {
 
     // MARK: - Разблокировка 2K / QHD (2560×1440) и Ultrawide (3440×1440) на Apple Silicon
 
-    /// Определяет нативное физическое разрешение выбранного монитора.
-    private func nativeResolutionForSelectedDisplay() -> (width: Int, height: Int, freq: Double) {
+    /// Определяет нативное физическое разрешение и доступные частоты выбранного монитора.
+    private func nativeResolutionForSelectedDisplay() -> (width: Int, height: Int, freq: Double, additionalFreqs: [Double]) {
+        if let vNative = virtualHiDPIService.nativeResolution(for: selectedDisplayID) {
+            let freq = Double(currentMode?.freq ?? 60)
+            let rates = ModeResolver.nativeRefreshRates(in: availableModes).sorted(by: >).map(Double.init)
+            return (vNative.width, vNative.height, freq > 0 ? freq : 60.0, rates)
+        }
         let best1x = availableModes.filter { !$0.isHiDPI }.max(by: { $0.area < $1.area }) ?? currentMode
         let width = best1x?.width ?? 2560
         let height = best1x?.height ?? 1440
         let freq = Double(currentMode?.freq ?? best1x?.freq ?? 60)
-        return (width, height, freq > 0 ? freq : 60.0)
+        let rates = ModeResolver.nativeRefreshRates(in: availableModes)
+            .sorted(by: >)
+            .map(Double.init)
+            .filter { $0 != freq }
+        return (width, height, freq > 0 ? freq : 60.0, rates)
     }
 
     /// Мгновенно включает или выключает виртуальный HiDPI-фреймбуфер (`CGVirtualDisplay` + аппаратный Mirroring).
     public func toggleVirtualHiDPI() {
-        guard let device = selectedDevice else { return }
+        guard let device = effectivePhysicalDevice else { return }
         lastError = nil
         statusMessage = nil
 
         if virtualHiDPIService.isVirtualHiDPIActive(for: selectedDisplayID) {
+            preferencesStore.setVirtualHiDPIEnabled(false, for: device)
             if let physicalID = virtualHiDPIService.disableVirtualHiDPI(for: selectedDisplayID) {
                 selectedDisplayID = physicalID
             }
@@ -491,20 +551,70 @@ public final class DisplayStore {
             for: device,
             nativeWidth: native.width,
             nativeHeight: native.height,
-            refreshRate: native.freq
+            refreshRate: native.freq,
+            additionalRefreshRates: native.additionalFreqs
         ) {
+            preferencesStore.setVirtualHiDPIEnabled(true, for: device)
             selectedDisplayID = vDisplayID
             isVirtualHiDPIActive = true
-            statusMessage = "✓ Виртуальный 2K/Ultrawide HiDPI активирован"
             refreshDisplays()
+
+            // Если экран остался в нативном 100% разрешении (где 1pt = 1px без суперсэмплинга),
+            // сразу переключаем виртуальный дисплей на сохранённый или оптимальный (~80%) HiDPI-режим (например 2752×1152 для 3440×1440).
+            if let targetMode = preferredInitialModeForVirtualDisplay(
+                device: device,
+                nativeWidth: native.width,
+                nativeHeight: native.height
+            ), targetMode.id != currentMode?.id {
+                if hardwareClient.setDisplayMode(targetMode.id, for: vDisplayID) {
+                    let key = ModeKey(mode: targetMode)
+                    preferencesStore.addVerifiedModeKey(key, for: device)
+                    preferencesStore.setPreferredModeKey(key, for: device)
+                    refreshModes(invalidateCache: true)
+                }
+            }
+
+            if let active = currentMode {
+                statusMessage = "✓ Виртуальный HiDPI активен (\(active.width)×\(active.height))"
+            } else {
+                statusMessage = "✓ Виртуальный 2K/Ultrawide HiDPI активирован"
+            }
         } else {
             lastError = "Не удалось создать виртуальный HiDPI-буфер"
         }
     }
 
+    private func preferredInitialModeForVirtualDisplay(
+        device: DisplayDevice,
+        nativeWidth: Int,
+        nativeHeight: Int
+    ) -> DisplayMode? {
+        // 1. Если у пользователя уже сохранён промежуточный HiDPI-режим (< нативного), используем его
+        if let saved = preferencesStore.preferredModeKey(for: device),
+           saved.isHiDPI,
+           (saved.width < nativeWidth || saved.height < nativeHeight),
+           let matched = ModeResolver.findMode(matching: saved, in: availableModes) {
+            return matched
+        }
+
+        // 2. Иначе выбираем оптимальное (~80%) HiDPI-разрешение с настоящим суперсэмплингом (2752×1152 для 3440×1440, 2048×1152 для 2560×1440)
+        if let recommended = CustomHiDPISpec.preferredHiDPIResolution(
+            nativeWidth: nativeWidth,
+            nativeHeight: nativeHeight
+        ) {
+            return hidpiModes.first(where: {
+                $0.width == recommended.logicalWidth && $0.height == recommended.logicalHeight
+            }) ?? availableModes.first(where: {
+                $0.isHiDPI && $0.width == recommended.logicalWidth && $0.height == recommended.logicalHeight
+            })
+        }
+
+        return nil
+    }
+
     /// Устанавливает или удаляет системный профиль `scale-resolutions` в `/Library/Displays/Contents/Resources/Overrides`.
     public func toggleSystemOverride() async {
-        guard let device = selectedDevice, !isInstallingOverride else { return }
+        guard let device = effectivePhysicalDevice, !isInstallingOverride else { return }
         isInstallingOverride = true
         defer { isInstallingOverride = false }
         lastError = nil

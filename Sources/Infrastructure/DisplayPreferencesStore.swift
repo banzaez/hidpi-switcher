@@ -18,6 +18,14 @@ public protocol DisplayPreferencesStoreProtocol: AnyObject {
 
     func verifiedModeKeys(for display: DisplayDevice) -> Set<ModeKey>
     func addVerifiedModeKey(_ key: ModeKey, for display: DisplayDevice)
+
+    func isVirtualHiDPIEnabled(for display: DisplayDevice) -> Bool
+    func setVirtualHiDPIEnabled(_ enabled: Bool, for display: DisplayDevice)
+}
+
+extension DisplayPreferencesStoreProtocol {
+    public func isVirtualHiDPIEnabled(for display: DisplayDevice) -> Bool { false }
+    public func setVirtualHiDPIEnabled(_ enabled: Bool, for display: DisplayDevice) {}
 }
 
 /// Реализация хранилища поверх `UserDefaults`.
@@ -32,6 +40,7 @@ public final class UserDefaultsDisplayPreferencesStore: DisplayPreferencesStoreP
         static let preferredModesPrefix = "HiDpiSwitcher.preferredMode."
         static let favoriteModesPrefix = "HiDpiSwitcher.favoriteModes."
         static let verifiedModesPrefix = "HiDpiSwitcher.verifiedModes."
+        static let virtualHiDPIPrefix = "HiDpiSwitcher.virtualHiDPI."
     }
 
     private let defaults: UserDefaults
@@ -183,5 +192,15 @@ public final class UserDefaultsDisplayPreferencesStore: DisplayPreferencesStoreP
         if let data = try? encoder.encode(Array(current)) {
             defaults.set(data, forKey: storageKey)
         }
+    }
+
+    public func isVirtualHiDPIEnabled(for display: DisplayDevice) -> Bool {
+        let storageKey = Keys.virtualHiDPIPrefix + display.persistentIdentifier
+        return defaults.bool(forKey: storageKey)
+    }
+
+    public func setVirtualHiDPIEnabled(_ enabled: Bool, for display: DisplayDevice) {
+        let storageKey = Keys.virtualHiDPIPrefix + display.persistentIdentifier
+        defaults.set(enabled, forKey: storageKey)
     }
 }

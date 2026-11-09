@@ -10,11 +10,14 @@ public enum ModeResolver {
         rawModes: [DisplayMode],
         currentModeID: Int,
         minimumLongEdge: Int = defaultMinimumLongEdge,
-        preferredFrequency: Int? = nil
+        preferredFrequency: Int? = nil,
+        maxLogicalWidth: Int? = nil,
+        maxLogicalHeight: Int? = nil
     ) -> ModeCatalog {
         // Отбрасываем «призрачные» частоты, которых нет у нативного сигнала панели:
         // такие режимы система перечисляет, но выводят они обрезанную картинку.
         let rawModes = filterByNativeTimings(rawModes, currentModeID: currentModeID)
+        let targetAspectRatio = nativeAspectRatio(in: rawModes)
 
         var uniqueModes: [DisplayMode] = []
         uniqueModes.reserveCapacity(rawModes.count)
@@ -65,6 +68,23 @@ public enum ModeResolver {
         var orderedResolutionKeys: [ResolutionKey] = []
 
         for mode in uniqueModes where mode.maxDimension >= minimumLongEdge {
+            // При выключенном «Показывать все разрешения» отсекаем:
+            // 1) технические 2x backing-буферы виртуального дисплея (например 6880×2880 1x на 3440×1440 экране),
+            // 2) искажённые режимы с чужим соотношением сторон (4:3 1600×1200, 1344×1008, 1280×960 на 21:9/16:9 экранах).
+            if minimumLongEdge > 0 && mode.id != currentModeID {
+                if let maxLogicalWidth, let maxLogicalHeight,
+                   mode.width > maxLogicalWidth || mode.height > maxLogicalHeight {
+                    continue
+                }
+                if let targetAspectRatio, mode.height > 0 {
+                    let ratio = Double(mode.width) / Double(mode.height)
+                    let relativeDiff = abs(ratio - targetAspectRatio) / targetAspectRatio
+                    if relativeDiff > 0.08 {
+                        continue
+                    }
+                }
+            }
+
             let resKey = ResolutionKey(mode: mode)
             if let existing = groupedByResolution[resKey] {
                 if mode.id == currentModeID {
@@ -114,6 +134,33 @@ public enum ModeResolver {
             availableRefreshRates: refreshRates,
             currentMode: current
         )
+    }
+
+    /// Нативное соотношение сторон панели (по максимальному по площади режиму).
+    public static func nativeAspectRatio(in modes: [DisplayMode]) -> Double? {
+        let standardMax = modes.filter { !$0.isHiDPI && $0.height > 0 }.max(by: { $0.area < $1.area })
+        let fallbackMax = modes.filter { $0.height > 0 }.max(by: { $0.area < $1.area })
+        guard let ref = standardMax ?? fallbackMax, ref.height > 0 else { return nil }
+        return Double(ref.width) / Double(ref.height)
+    }
+
+    /// Проверяет наличие рабочих промежуточных HiDPI-разрешений (70%–95% от нативного),
+    /// которые дают реальный Retina-суперсэмплинг на 2K / Ultrawide мониторах.
+    public static func hasIntermediateHiDPIModes(
+        in modes: [DisplayMode],
+        nativeWidth: Int,
+        nativeHeight: Int
+    ) -> Bool {
+        guard nativeWidth > 0, nativeHeight > 0 else { return false }
+        let minW = Int((Double(nativeWidth) * 0.68).rounded())
+        let maxW = Int((Double(nativeWidth) * 0.96).rounded())
+        let nativeRatio = Double(nativeWidth) / Double(nativeHeight)
+        return modes.contains { mode in
+            guard mode.isHiDPI, mode.height > 0 else { return false }
+            let ratio = Double(mode.width) / Double(mode.height)
+            let matchesAspect = abs(ratio - nativeRatio) / nativeRatio <= 0.08
+            return matchesAspect && mode.width >= minW && mode.width <= maxW
+        }
     }
 
     /// Частоты нативного сигнала: частоты 1x-режимов с наибольшей площадью (физическое разрешение панели).
