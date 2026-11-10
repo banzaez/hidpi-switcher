@@ -134,6 +134,54 @@ struct ModeResolverTests {
         // Проверка пути Override Plist
         let path = CustomHiDPISpec.overrideFilePath(vendorID: 0x1e6d, productID: 0x5b11)
         #expect(path.hasSuffix("/DisplayVendorID-1e6d/DisplayProductID-5b11"))
+
+        // Проверка словаря Override Plist: только чистые 16-байтные HiDPI-записи (без 8-байтных Low-Res дублей)
+        let dummyDevice = DisplayDevice(id: 100, name: "Dell U2724D", isMain: false, isBuiltin: false, vendorNumber: 0x10ac, modelNumber: 0x4235)
+        let plistDict = CustomHiDPISpec.buildOverridePlistDictionary(device: dummyDevice, resolutions: qhd)
+        guard let scaleRes = plistDict["scale-resolutions"] as? [Data] else {
+            Issue.record("scale-resolutions отсутствует в словаре Override Plist")
+            return
+        }
+        #expect(!scaleRes.isEmpty)
+        for data in scaleRes {
+            #expect(data.count == 16)
+            // Последние 8 байт должны содержать scale = 1 (0x00000001) и флаг HiDPI (0x00200000)
+            #expect(Array(data[8..<12]) == [0x00, 0x00, 0x00, 0x01])
+            #expect(Array(data[12..<16]) == [0x00, 0x20, 0x00, 0x00])
+        }
+    }
+
+    @Test("Встроенный дисплей MacBook защищён от включения виртуального HiDPI и системного Override")
+    @MainActor
+    func builtinDisplayProtectedFromVirtualHiDPIAndOverride() async {
+        let mockClient = MockHardwareClient()
+        let mockPrefs = MockPreferencesStore()
+        let mockHotKeys = MockHotKeyService()
+        let mockVirtual = MockVirtualHiDPIService()
+        let mockOverride = MockOverrideInstaller()
+
+        let store = DisplayStore(
+            hardwareClient: mockClient,
+            preferencesStore: mockPrefs,
+            hotKeyService: mockHotKeys,
+            virtualHiDPIService: mockVirtual,
+            overrideInstaller: mockOverride,
+            revertTimeoutSeconds: 0
+        )
+
+        // Выбираем встроенный дисплей (id: 1, isBuiltin: true)
+        store.selectDisplay(1)
+        #expect(store.isBuiltinSelected == true)
+        #expect(store.canManageVirtualHiDPI == false)
+        #expect(store.canManageSystemOverride == false)
+
+        store.toggleVirtualHiDPI()
+        #expect(store.isVirtualHiDPIActive == false)
+        #expect(store.lastError?.contains("встроенного экрана") == true)
+
+        await store.toggleSystemOverride()
+        #expect(store.hasInstalledSystemOverride == false)
+        #expect(store.lastError?.contains("встроенного экрана") == true)
     }
 
     @Test("Виртуальный HiDPI-фреймбуфер (2K/Ultrawide) и системный Override переключаются через DisplayStore")

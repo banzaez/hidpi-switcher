@@ -102,7 +102,7 @@ public enum CustomHiDPISpec {
             let w = Int((Double(landW) * scale / 2.0).rounded()) * 2
             let h = Int((Double(landH) * scale / 2.0).rounded()) * 2
             let candidate = HiDPIResolutionPair(logicalWidth: w, logicalHeight: h)
-            if w >= 1280, h > 0, !landscapeCandidates.contains(candidate) {
+            if w >= 960, h > 0, !landscapeCandidates.contains(candidate) {
                 landscapeCandidates.append(candidate)
             }
         }
@@ -170,59 +170,38 @@ public enum CustomHiDPISpec {
     }
 
     /// Формирует словарь Override Plist для сохранения в `/Library/Displays/Contents/Resources/Overrides/...`.
+    /// Использует стандартные 16-байтные записи с флагом HiDPI (scale=1, flags=0x00200000) без лишних 8-байтных
+    /// записей (которые WindowServer классифицирует как 1x Low-Res) и без конфликтующих записей.
     public static func buildOverridePlistDictionary(
         device: DisplayDevice,
         resolutions: [HiDPIResolutionPair]
     ) -> [String: Any] {
         var scaleResolutions: [Data] = []
-        scaleResolutions.reserveCapacity(resolutions.count * 5)
+        scaleResolutions.reserveCapacity(resolutions.count * 2)
+        var seenEntries = Set<Data>()
 
-        // 1. Базовые 8-байтные записи (backing + logical), как в современных профилях Apple (DisplayProductID-ae37/ae47)
         for res in resolutions {
-            scaleResolutions.append(
-                encodeBaseResolutionEntry(
-                    width: UInt32(res.backingWidth),
-                    height: UInt32(res.backingHeight)
-                )
+            // 1. Backing-буфер фреймбуфера (2x) с флагом HiDPI
+            let backingEntry = encodeScaleResolutionEntry(
+                width: UInt32(res.backingWidth),
+                height: UInt32(res.backingHeight),
+                scale: 1,
+                hiDPIFlag: 0x0020_0000
             )
-            scaleResolutions.append(
-                encodeBaseResolutionEntry(
-                    width: UInt32(res.logicalWidth),
-                    height: UInt32(res.logicalHeight)
-                )
-            )
-        }
+            if seenEntries.insert(backingEntry).inserted {
+                scaleResolutions.append(backingEntry)
+            }
 
-        // 2. Классические 16-байтные записи с флагом HiDPI (scale=1, flags=0x00200000)
-        for res in resolutions {
-            scaleResolutions.append(
-                encodeScaleResolutionEntry(
-                    width: UInt32(res.backingWidth),
-                    height: UInt32(res.backingHeight),
-                    scale: 1,
-                    hiDPIFlag: 0x0020_0000
-                )
+            // 2. Логическое разрешение в поинтах (1x) с флагом HiDPI
+            let logicalEntry = encodeScaleResolutionEntry(
+                width: UInt32(res.logicalWidth),
+                height: UInt32(res.logicalHeight),
+                scale: 1,
+                hiDPIFlag: 0x0020_0000
             )
-            scaleResolutions.append(
-                encodeScaleResolutionEntry(
-                    width: UInt32(res.logicalWidth),
-                    height: UInt32(res.logicalHeight),
-                    scale: 1,
-                    hiDPIFlag: 0x0020_0000
-                )
-            )
-        }
-
-        // 3. Записи синтеза масштабированных Retina-режимов (scale=9, flags=0x00a00000)
-        for res in resolutions {
-            scaleResolutions.append(
-                encodeScaleResolutionEntry(
-                    width: UInt32(res.backingWidth),
-                    height: UInt32(res.backingHeight),
-                    scale: 9,
-                    hiDPIFlag: 0x00A0_0000
-                )
-            )
+            if seenEntries.insert(logicalEntry).inserted {
+                scaleResolutions.append(logicalEntry)
+            }
         }
 
         let cleanName = device.name.replacingOccurrences(of: " (HiDPI)", with: "")

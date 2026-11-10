@@ -9,6 +9,11 @@
 - ★ **Избранные пресеты (`⌃⌥⌘F`)**: быстрое добавление часто используемых режимов (например, рабочего и для демонстрации экрана) в верхнюю часть меню и циклическое переключение между ними по глобальному хоткею `⌃⌥⌘F`.
 - ⏱ **Нативный диалог безопасного отката (10 сек)**: при выборе нового или непроверенного режима поверх экрана появляется отдельное плавающее модальное окно с живым индикатором обратного отсчёта. Принять изменения можно клавишей `Enter`, отменить — `Esc`. Если экран погас («Out of Range»), через 10 секунд предыдущий режим вернётся автоматически. В настройках доступен режим «Всегда подтверждать смену режима».
 - 🔄 **Автовосстановление профиля монитора**: автоматически применяет сохранённый HiDPI-режим при входе в систему или горячем переподключении монитора (USB-C / DisplayPort / HDMI).
+- 🚀 **Профессиональная система проверки и установки обновлений**:
+  - **Автоматическая и ручная проверка**: интеграция с GitHub Releases API (`banzaez/hidpi-switcher`), семантическое версионирование (SemVer 2.0), фоновая проверка раз в сутки и кнопка **«Проверить обновления...»** в меню «Параметры».
+  - **Нативное окно обновления (Sparkle-стиль на NSPanel)**: отображение текущей и новой версии, размера архива, полного списка изменений (Release Notes) в форматированном виде.
+  - **Атомарная загрузка и автообновление «в 1 клик»**: загрузка .zip бандла с индикатором прогресса, распаковка через нативный `/usr/bin/ditto`, атомарная подмена `.app` бандла, сброс атрибутов карантина (`com.apple.quarantine`) и автоматический перезапуск приложения.
+  - **Гибкое управление**: опции «Обновить и перезапустить», «Напомнить позже», «Пропустить версию», переход на страницу релиза на GitHub.
 - 📐 **Поддержка вертикальных (портретных) экранов** (`1080×1920` и др.) и режим отображения малых разрешений (`< 1280px`).
 - 🔓 **Разблокировка HiDPI для 2K / QHD (2560×1440), Ultrawide (3440×1440, 5120×1440 / 5120×2160) и 16:10 мониторов (Apple Silicon M1–M5 и Intel)**:
   - **Мгновенный виртуальный HiDPI-фреймбуфер (`CGVirtualDisplay` + Hardware Mirroring)** — без перезагрузки и без прав администратора создаёт Retina-буфер и сразу включает оптимальный суперсэмплинг (`2752×1152 HiDPI` для Ultrawide 3440×1440, `2048×1152 HiDPI` для 2K 2560×1440). Поддерживает частоту обновления физической панели (`100Hz`, `60Hz`, `50Hz`) и сохраняет состояние при перезапуске.
@@ -21,11 +26,11 @@
 - **Чистый Swift 6 (`StrictConcurrency`)**: нулевые накладные расходы при вызове приватного CGS API (`@_silgen_name` + стековый буфер `CGSModeRaw` без Objective-C моста и аллокаций в куче).
 - **Observation (`@Observable`)**: гранулярное реактивное отслеживание состояния в SwiftUI без лишних перерисовок `MenuBarExtra`.
 - **Четырёхслойная архитектура**:
-  - `Sources/Domain` — чистые `Sendable` модели (`DisplayDevice`, `DisplayMode`, `ModeKey`, `ResolutionKey`, `ModeCatalog`) и алгоритмы дедупликации/группировки/подбора разрешений (`ModeResolver`).
-  - `Sources/Infrastructure` — системный мост `CGSPrivate`, `DisplayHardwareClient` (`AsyncStream` событий реконфигурации CoreGraphics), `CarbonGlobalHotKeyService` (`RegisterEventHotKey` без запроса прав Accessibility) и `DisplayPreferencesStore` (`UserDefaults`).
-  - `Sources/Application` — `@Observable @MainActor` сторы (`DisplayStore` с дебаунсингом событий монитора и `LaunchAtLoginStore` поверх `SMAppService`).
-  - `Sources/Presentation` — декларативный SwiftUI-интерфейс (`HiDpiApp`, `ModeMenu` со стабильными кнопками-переключателями, отдельный модальный `RevertConfirmationDialog` на `NSPanel`, `DisplayFormatters`).
-- **Swift Testing (`@Test`, `#expect`)**: модульные тесты раскладки памяти ABI CGS, группировки частот, портретных мониторов, избранных пресетов, автовосстановления и таймера безопасного отката.
+  - `Sources/Domain` — чистые `Sendable` модели (`DisplayDevice`, `DisplayMode`, `ModeKey`, `ResolutionKey`, `ModeCatalog`, `SemanticVersion`, `UpdateInfo`) и алгоритмы дедупликации/группировки/подбора разрешений (`ModeResolver`).
+  - `Sources/Infrastructure` — системный мост `CGSPrivate`, `DisplayHardwareClient` (`AsyncStream` событий реконфигурации CoreGraphics), `CarbonGlobalHotKeyService` (`RegisterEventHotKey` без запроса прав Accessibility), `DisplayPreferencesStore` / `UpdatePreferencesStore` (`UserDefaults`) и `GitHubUpdateService` (URLSession, `ditto` распаковка, атомарный скрипт перезапуска).
+  - `Sources/Application` — `@Observable @MainActor` сторы (`DisplayStore` с дебаунсингом событий монитора, `LaunchAtLoginStore` поверх `SMAppService` и `UpdateStore` с поддержкой ручной/фоновой проверки и инсталляции).
+  - `Sources/Presentation` — декларативный SwiftUI-интерфейс (`HiDpiApp`, `ModeMenu` со стабильными кнопками-переключателями, отдельный модальный `RevertConfirmationDialog` на `NSPanel`, нативное окно обновления `UpdateDialogView` / `UpdatePresenter`, `DisplayFormatters`).
+- **Swift Testing (`@Test`, `#expect`)**: 23 модульных теста (раскладка памяти ABI CGS, группировка частот, портретные мониторы, избранные пресеты, автовосстановление, таймер отката, семантическое версионирование, парсинг GitHub Releases и цепочка автообновления).
 
 ## Требования
 

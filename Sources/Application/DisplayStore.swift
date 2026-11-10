@@ -511,6 +511,20 @@ public final class DisplayStore {
 
     // MARK: - Разблокировка 2K / QHD (2560×1440) и Ultrawide (3440×1440) на Apple Silicon
 
+    public var canManageVirtualHiDPI: Bool {
+        guard let device = effectivePhysicalDevice, !device.isBuiltin else { return false }
+        return true
+    }
+
+    public var canManageSystemOverride: Bool {
+        guard let device = effectivePhysicalDevice, !device.isBuiltin else { return false }
+        return true
+    }
+
+    public var isBuiltinSelected: Bool {
+        effectivePhysicalDevice?.isBuiltin ?? false
+    }
+
     /// Определяет нативное физическое разрешение и доступные частоты выбранного монитора.
     private func nativeResolutionForSelectedDisplay() -> (width: Int, height: Int, freq: Double, additionalFreqs: [Double]) {
         if let vNative = virtualHiDPIService.nativeResolution(for: selectedDisplayID) {
@@ -534,6 +548,11 @@ public final class DisplayStore {
         guard let device = effectivePhysicalDevice else { return }
         lastError = nil
         statusMessage = nil
+
+        if device.isBuiltin {
+            lastError = "Виртуальный HiDPI недоступен для встроенного экрана MacBook"
+            return
+        }
 
         if virtualHiDPIService.isVirtualHiDPIActive(for: selectedDisplayID) {
             preferencesStore.setVirtualHiDPIEnabled(false, for: device)
@@ -615,10 +634,16 @@ public final class DisplayStore {
     /// Устанавливает или удаляет системный профиль `scale-resolutions` в `/Library/Displays/Contents/Resources/Overrides`.
     public func toggleSystemOverride() async {
         guard let device = effectivePhysicalDevice, !isInstallingOverride else { return }
-        isInstallingOverride = true
-        defer { isInstallingOverride = false }
         lastError = nil
         statusMessage = nil
+
+        if device.isBuiltin {
+            lastError = "Системный профиль Override недоступен для встроенного экрана MacBook"
+            return
+        }
+
+        isInstallingOverride = true
+        defer { isInstallingOverride = false }
 
         do {
             if overrideInstaller.isOverrideInstalled(for: device) {

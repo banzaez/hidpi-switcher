@@ -5,6 +5,7 @@ import SwiftUI
 struct MenuBarContentView: View {
     @Bindable var displayStore: DisplayStore
     let launchStore: LaunchAtLoginStore
+    @Bindable var updateStore: UpdateStore
 
     private var displaySelectionBinding: Binding<CGDirectDisplayID> {
         Binding(
@@ -14,6 +15,14 @@ struct MenuBarContentView: View {
     }
 
     var body: some View {
+        // 0. Баннер доступного обновления (если найдено)
+        if let update = updateStore.availableUpdate {
+            Button("⚡️ Доступно обновление (\(update.version.description))...") {
+                updateStore.presentUpdateDialog()
+            }
+            Divider()
+        }
+
         // 1. Выбор монитора (если подключено более одного)
         if displayStore.connectedDisplays.count > 1 {
             Menu("Выбор экрана: \(displayStore.selectedDevice?.name ?? "Экран")") {
@@ -142,35 +151,42 @@ struct MenuBarContentView: View {
         )
 
         // 9. Разблокировка 2K / QHD (2560×1440) и Ultrawide (3440×1440) на Apple Silicon
-        Button(displayStore.isVirtualHiDPIActive
-               ? "✓ Виртуальный HiDPI-буфер (2K / Ultrawide)"
-               : "Виртуальный HiDPI-буфер (2K / Ultrawide)") {
-            // Выполняем асинхронно после закрытия меню macOS, чтобы WindowServer
-            // вышел из модального Menu Tracking Loop и не отклонял реконфигурацию экранов
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                displayStore.toggleVirtualHiDPI()
-            }
-        }
-
-        Menu("Системный профиль Override") {
+        if displayStore.isBuiltinSelected {
+            Text("ℹ️ Встроенный дисплей MacBook уже работает в нативном Retina HiDPI")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
             Button(displayStore.isVirtualHiDPIActive
-                   ? "✓ Виртуальный HiDPI-буфер активен (отключить)"
-                   : "Включить виртуальный HiDPI-буфер (мгновенно)") {
+                   ? "✓ Виртуальный HiDPI-буфер (2K / Ultrawide)"
+                   : "Виртуальный HiDPI-буфер (2K / Ultrawide)") {
+                // Выполняем асинхронно после закрытия меню macOS, чтобы WindowServer
+                // вышел из модального Menu Tracking Loop и не отклонял реконфигурацию экранов
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     displayStore.toggleVirtualHiDPI()
                 }
             }
+            .disabled(!displayStore.canManageVirtualHiDPI)
 
-            Divider()
-
-            Button(displayStore.hasInstalledSystemOverride
-                   ? "Удалить системный профиль Override..."
-                   : "Установить системный профиль Override...") {
-                Task {
-                    await displayStore.toggleSystemOverride()
+            Menu("Системный профиль Override") {
+                Button(displayStore.isVirtualHiDPIActive
+                       ? "✓ Виртуальный HiDPI-буфер активен (отключить)"
+                       : "Включить виртуальный HiDPI-буфер (мгновенно)") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        displayStore.toggleVirtualHiDPI()
+                    }
                 }
+
+                Divider()
+
+                Button(displayStore.hasInstalledSystemOverride
+                       ? "Удалить системный профиль Override..."
+                       : "Установить системный профиль Override...") {
+                    Task {
+                        await displayStore.toggleSystemOverride()
+                    }
+                }
+                .disabled(displayStore.isInstallingOverride || !displayStore.canManageSystemOverride)
             }
-            .disabled(displayStore.isInstallingOverride)
         }
 
         Divider()
@@ -189,6 +205,20 @@ struct MenuBarContentView: View {
             Toggle("Показывать разрешения < 1280px", isOn: $displayStore.showAllResolutions)
 
             Toggle("Подтверждать смену режима диалогом", isOn: $displayStore.alwaysConfirmModeChanges)
+
+            Divider()
+
+            Toggle("Автоматически проверять обновления", isOn: Binding(
+                get: { updateStore.automaticallyCheckForUpdates },
+                set: { updateStore.automaticallyCheckForUpdates = $0 }
+            ))
+
+            Button(updateStore.state == .checking ? "Проверка обновлений..." : "Проверить обновления...") {
+                Task {
+                    await updateStore.checkForUpdates(manual: true)
+                }
+            }
+            .disabled(updateStore.state == .checking)
         }
 
         Divider()
@@ -211,13 +241,20 @@ struct MenuBarContentView: View {
 struct HiDpiApp: App {
     @State private var displayStore: DisplayStore
     @State private var launchStore = LaunchAtLoginStore()
+    @State private var updateStore: UpdateStore
     private let revertPresenter: RevertConfirmationPresenter
+    private let updatePresenter: UpdatePresenter
 
     init() {
-        let presenter = RevertConfirmationPresenter()
-        self.revertPresenter = presenter
-        let store = DisplayStore(revertPresenter: presenter)
-        _displayStore = State(initialValue: store)
+        let rPresenter = RevertConfirmationPresenter()
+        self.revertPresenter = rPresenter
+        let dStore = DisplayStore(revertPresenter: rPresenter)
+        _displayStore = State(initialValue: dStore)
+
+        let uPresenter = UpdatePresenter()
+        self.updatePresenter = uPresenter
+        let uStore = UpdateStore(presenter: uPresenter)
+        _updateStore = State(initialValue: uStore)
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -225,8 +262,12 @@ struct HiDpiApp: App {
             queue: .main
         ) { _ in
             MainActor.assumeIsolated {
-                store.cleanupOnTerminate()
+                dStore.cleanupOnTerminate()
             }
+        }
+
+        Task {
+            await uStore.performStartupCheckIfNeeded()
         }
     }
 
@@ -241,7 +282,8 @@ struct HiDpiApp: App {
         MenuBarExtra("HiDPI Switcher", systemImage: statusIcon) {
             MenuBarContentView(
                 displayStore: displayStore,
-                launchStore: launchStore
+                launchStore: launchStore,
+                updateStore: updateStore
             )
         }
     }

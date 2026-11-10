@@ -177,11 +177,21 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
             descriptor.sizeInMillimeters = CGSize(width: 600, height: 340)
         }
 
-        // Стандартные координаты цветового охвата sRGB / Rec.709
-        descriptor.redPrimary = CGPoint(x: 0.6400, y: 0.3300)
-        descriptor.greenPrimary = CGPoint(x: 0.3000, y: 0.6000)
-        descriptor.bluePrimary = CGPoint(x: 0.1500, y: 0.0600)
-        descriptor.whitePoint = CGPoint(x: 0.3127, y: 0.3290)
+        // Подбираем цветовой охват на основе реального дисплея (Display P3 для Wide Gamut или sRGB)
+        let colorSpace = CGDisplayCopyColorSpace(device.id)
+        if colorSpace.isWideGamutRGB {
+            // Координаты цветового охвата Display P3 (D65)
+            descriptor.redPrimary = CGPoint(x: 0.6800, y: 0.3200)
+            descriptor.greenPrimary = CGPoint(x: 0.2650, y: 0.6900)
+            descriptor.bluePrimary = CGPoint(x: 0.1500, y: 0.0600)
+            descriptor.whitePoint = CGPoint(x: 0.3127, y: 0.3290)
+        } else {
+            // Стандартные координаты цветового охвата sRGB / Rec.709 (D65)
+            descriptor.redPrimary = CGPoint(x: 0.6400, y: 0.3300)
+            descriptor.greenPrimary = CGPoint(x: 0.3000, y: 0.6000)
+            descriptor.bluePrimary = CGPoint(x: 0.1500, y: 0.0600)
+            descriptor.whitePoint = CGPoint(x: 0.3127, y: 0.3290)
+        }
         // ВАЖНО: используем отдельную фоновую очередь, а не DispatchQueue.main!
         // Если передать DispatchQueue.main, WindowServer блокируется при синхронном
         // вызове CGCompleteDisplayConfiguration, что приводит к ошибке 1001 (kCGErrorIllegalArgument / timeout)
