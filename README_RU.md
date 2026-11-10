@@ -1,6 +1,12 @@
 # HiDpiSwitcher
 
-**Русский** | [English](README.md)
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="HiDpiSwitcher App Icon" width="128" height="128" />
+</p>
+
+<p align="center">
+  <b>Русский</b> | <a href="README.md">English</a>
+</p>
 
 Легковесная macOS-утилита для строки меню (Menu Bar), позволяющая переключать внешние и встроенные дисплеи в нативное HiDPI (Retina 2x) разрешение без замыливания текста.
 

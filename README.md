@@ -1,6 +1,10 @@
 # HiDpiSwitcher
 
 <p align="center">
+  <img src="Resources/AppIcon.png" alt="HiDpiSwitcher App Icon" width="128" height="128" />
+</p>
+
+<p align="center">
   <b>A lightweight, zero-overhead macOS menu bar utility for native HiDPI (Retina 2x) switching, virtual display supersampling, and refresh rate management.</b>
 </p>
 
