@@ -1,66 +1,79 @@
 # HiDpiSwitcher
 
-Легковесная macOS-утилита для строки меню (Menu Bar), позволяющая переключать внешние и встроенные дисплеи в нативное HiDPI (Retina 2x) разрешение без замыливания текста.
+**English** | [Русский](README_RU.md)
 
-## Функциональные возможности
+HiDpiSwitcher is a lightweight, native macOS menu bar application designed to easily switch displays into crisp HiDPI (Retina 2x) modes, unlock custom virtual resolutions, and manage refresh rates.
 
-- ⚡️ **Переключение HiDPI в 1 клик или по `⌃⌥⌘H`**: мгновенно сопоставляет пару `1x ↔ 2x` (с сохранением частоты обновления и поддержкой физического масштабирования `3840×2160 1x ↔ 1920×1080 2x`).
-- 🖥 **Раздельный выбор разрешения и частоты обновления (`Hz`)**: список разрешений сгруппирован по геометрии (без десятков дублей `60/120/144/240Hz`), а переключение герцовки для активного разрешения вынесено в отдельное подменю **«Частота обновления»** с гарантированной фиксацией разрешения и фильтрацией неподдерживаемых нативной матрицей частот.
-- ★ **Избранные пресеты (`⌃⌥⌘F`)**: быстрое добавление часто используемых режимов (например, рабочего и для демонстрации экрана) в верхнюю часть меню и циклическое переключение между ними по глобальному хоткею `⌃⌥⌘F`.
-- ⏱ **Нативный диалог безопасного отката (10 сек)**: при выборе нового или непроверенного режима поверх экрана появляется отдельное плавающее модальное окно с живым индикатором обратного отсчёта. Принять изменения можно клавишей `Enter`, отменить — `Esc`. Если экран погас («Out of Range»), через 10 секунд предыдущий режим вернётся автоматически. В настройках доступен режим «Всегда подтверждать смену режима».
-- 🔄 **Автовосстановление профиля монитора**: автоматически применяет сохранённый HiDPI-режим при входе в систему или горячем переподключении монитора (USB-C / DisplayPort / HDMI).
-- 🚀 **Профессиональная система проверки и установки обновлений**:
-  - **Автоматическая и ручная проверка**: интеграция с GitHub Releases API (`banzaez/hidpi-switcher`), семантическое версионирование (SemVer 2.0), фоновая проверка раз в сутки и кнопка **«Проверить обновления...»** в меню «Параметры».
-  - **Нативное окно обновления (Sparkle-стиль на NSPanel)**: отображение текущей и новой версии, размера архива, полного списка изменений (Release Notes) в форматированном виде.
-  - **Атомарная загрузка и автообновление «в 1 клик»**: загрузка .zip бандла с индикатором прогресса, распаковка через нативный `/usr/bin/ditto`, атомарная подмена `.app` бандла, сброс атрибутов карантина (`com.apple.quarantine`) и автоматический перезапуск приложения.
-  - **Гибкое управление**: опции «Обновить и перезапустить», «Напомнить позже», «Пропустить версию», переход на страницу релиза на GitHub.
-- 📐 **Поддержка вертикальных (портретных) экранов** (`1080×1920` и др.) и режим отображения малых разрешений (`< 1280px`).
-- 🔓 **Разблокировка HiDPI для 2K / QHD (2560×1440), Ultrawide (3440×1440, 5120×1440 / 5120×2160) и 16:10 мониторов (Apple Silicon M1–M5 и Intel)**:
-  - **Мгновенный виртуальный HiDPI-фреймбуфер (`CGVirtualDisplay` + Hardware Mirroring)** — без перезагрузки и без прав администратора создаёт Retina-буфер и сразу включает оптимальный суперсэмплинг (`2752×1152 HiDPI` для Ultrawide 3440×1440, `2048×1152 HiDPI` для 2K 2560×1440). Поддерживает частоту обновления физической панели (`100Hz`, `60Hz`, `50Hz`) и сохраняет состояние при перезапуске.
-  - **Улучшенное суперсэмплинг-сглаживание шрифтов**: идеальная чёткость текста при масштабировании за счёт пропорционального субпиксельного рендеринга (1 поинт = 1.25 физических пикселей матрицы).
-  - **Фильтрация искажённых соотношений сторон**: автоматическое отсечение чужих форматов (4:3 на 21:9 мониторах) и технических 2x backing-буферов больше нативной матрицы.
-  - **Установка системного профиля Override (`scale-resolutions`)** — генерирует расширенные триплеты бинарных записей `scale-resolutions` (8-byte + 16-byte HiDPI + 16-byte Retina scaled) для системной папки Overrides.
+---
 
-## Стек и архитектура (2026)
+## Features
 
-- **Чистый Swift 6 (`StrictConcurrency`)**: нулевые накладные расходы при вызове приватного CGS API (`@_silgen_name` + стековый буфер `CGSModeRaw` без Objective-C моста и аллокаций в куче).
-- **Observation (`@Observable`)**: гранулярное реактивное отслеживание состояния в SwiftUI без лишних перерисовок `MenuBarExtra`.
-- **Четырёхслойная архитектура**:
-  - `Sources/Domain` — чистые `Sendable` модели (`DisplayDevice`, `DisplayMode`, `ModeKey`, `ResolutionKey`, `ModeCatalog`, `SemanticVersion`, `UpdateInfo`) и алгоритмы дедупликации/группировки/подбора разрешений (`ModeResolver`).
-  - `Sources/Infrastructure` — системный мост `CGSPrivate`, `DisplayHardwareClient` (`AsyncStream` событий реконфигурации CoreGraphics), `CarbonGlobalHotKeyService` (`RegisterEventHotKey` без запроса прав Accessibility), `DisplayPreferencesStore` / `UpdatePreferencesStore` (`UserDefaults`) и `GitHubUpdateService` (URLSession, `ditto` распаковка, атомарный скрипт перезапуска).
-  - `Sources/Application` — `@Observable @MainActor` сторы (`DisplayStore` с дебаунсингом событий монитора, `LaunchAtLoginStore` поверх `SMAppService` и `UpdateStore` с поддержкой ручной/фоновой проверки и инсталляции).
-  - `Sources/Presentation` — декларативный SwiftUI-интерфейс (`HiDpiApp`, `ModeMenu` со стабильными кнопками-переключателями, отдельный модальный `RevertConfirmationDialog` на `NSPanel`, нативное окно обновления `UpdateDialogView` / `UpdatePresenter`, `DisplayFormatters`).
-- **Swift Testing (`@Test`, `#expect`)**: 23 модульных теста (раскладка памяти ABI CGS, группировка частот, портретные мониторы, избранные пресеты, автовосстановление, таймер отката, семантическое версионирование, парсинг GitHub Releases и цепочка автообновления).
+- **Instant HiDPI Switching (`⌃⌥⌘H`)**: Toggle smoothly between 1x and 2x Retina modes while maintaining the current refresh rate.
+- **Independent Resolution and Refresh Rate Control**: Resolutions are cleanly grouped by dimensions, while refresh rates are selected in a dedicated submenu with hardware frequency validation.
+- **Favorites & Fast Cycling (`⌃⌥⌘F`)**: Pin frequently used display modes to the top of the menu and cycle through them using a global keyboard shortcut.
+- **Safe Mode Rollback (10-second countdown)**: When switching to an untested mode, a floating confirmation panel appears. Confirm with `Enter` or cancel with `Esc`. If the signal is lost, the display automatically reverts after 10 seconds.
+- **Profile Auto-Restoration**: Automatically reapplies your chosen resolution and HiDPI profile upon system wake, login, or cable reconnection.
+- **HiDPI for External & Ultrawide Displays**:
+  - **Virtual Framebuffer (`CGVirtualDisplay` + Hardware Mirroring)**: Enables Retina scaling without requiring reboots or disabling System Integrity Protection (SIP).
+  - **Fractional Supersampling**: Crisp typography and subpixel clarity for 2K (2560×1440) and Ultrawide (3440×1440, 5120×1440) monitors.
+  - **Aspect Ratio Filtering**: Excludes incompatible aspect ratios and oversized backing buffers.
+  - **System Override Generator**: Produces binary `scale-resolutions` plists for macOS display override catalogs.
+- **Safety Protections**: Built-in guardrails prevent unintended override activation on built-in MacBook displays.
+- **Portrait Orientation Support**: Fully compatible with vertical displays (such as 1080×1920) and includes an optional filter for low resolutions.
+- **In-App Auto-Updates**: Seamless check, download, verification, and atomic replacement powered by GitHub Releases.
 
-## Требования
+---
 
-- macOS 14.0+ (Sonoma, Sequoia, Tahoe и новее)
-- Swift 6.0+ / Xcode Command Line Tools
+## Keyboard Shortcuts
 
-## Сборка, тесты и установка
+| Shortcut | Action | Description |
+| :--- | :--- | :--- |
+| `⌃⌥⌘H` | Toggle HiDPI | Quick switch between 1x and 2x Retina mode |
+| `⌃⌥⌘F` | Cycle Favorites | Fast cycle between saved favorite presets |
+| `Enter` | Confirm Mode | Keep the newly selected mode in the rollback prompt |
+| `Esc` | Revert Mode | Immediately cancel and revert to the previous mode |
 
-Запустить модульные тесты (`Swift Testing`):
+---
+
+## Architecture & Implementation
+
+HiDpiSwitcher is developed with modern Swift 6 paradigms:
+
+- **Strict Concurrency**: Fully compliant with Swift 6 strict concurrency checks and Sendable domain models.
+- **Low-Overhead CGS Integration**: Direct SkyLight private CGS interface via `@_silgen_name` and stack-allocated structures, eliminating heap overhead during display enumeration.
+- **Four-Layer Architecture**:
+  - `Sources/Domain`: Core models (`DisplayDevice`, `DisplayMode`, `ModeCatalog`), resolution matching, and version parsing.
+  - `Sources/Infrastructure`: CGS display client, display reconfiguration listener, virtual display manager, hotkey handlers, and GitHub release service.
+  - `Sources/Application`: Main-actor stores (`DisplayStore`, `LaunchAtLoginStore`, `UpdateStore`) coordinating user actions and state.
+  - `Sources/Presentation`: Declarative SwiftUI menu bar extra, custom AppKit countdown modal dialog, and update dialogs.
+- **Comprehensive Unit Testing**: Includes unit test coverage for memory layouts, mode deduplication, portrait filtering, and updater logic.
+
+---
+
+## Requirements
+
+- macOS 14.0 or later (Sonoma, Sequoia, and newer)
+- Apple Silicon or Intel Mac
+
+---
+
+## Building and Installation
+
+### Build from Source
+
 ```bash
-swift test
-# или
+# Run unit tests
 ./build.sh test
-```
 
-Собрать Universal Binary (`.app` под `arm64` + `x86_64`):
-```bash
+# Build Universal Binary (.app)
 ./build.sh
-```
 
-Собрать и установить в `/Applications`:
-```bash
+# Install into /Applications
 ./build.sh install
 ```
 
-Подпись по умолчанию — ad-hoc; для подписи своим сертификатом Developer ID:
-```bash
-SIGN_IDENTITY="Developer ID Application: ..." ./build.sh
-```
+---
 
-## Лицензия
+## License
 
-MIT
+This project is distributed under the terms of the MIT License.
