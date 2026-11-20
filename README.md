@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="Resources/AppIcon.png" alt="HiDpiSwitcher App Icon" width="76" height="76" />
+  <img src="Resources/app-icon.png" alt="HiDpiSwitcher App Icon" width="76" height="76" />
 </p>
 
 <p align="center">
