@@ -19,6 +19,9 @@ private final class MockUpdateChecker: UpdateCheckingService, @unchecked Sendabl
 private final class MockUpdateDownloader: UpdateDownloadingService, @unchecked Sendable {
     var downloadedURLToReturn: URL = URL(fileURLWithPath: "/tmp/mock-update.zip")
     var shouldFail: Bool = false
+    var waitUntilCancelled: Bool = false
+    var didCancel: Bool = false
+    var onDownloadStarted: (@Sendable () -> Void)?
 
     func downloadUpdate(
         from url: URL,
@@ -28,6 +31,15 @@ private final class MockUpdateDownloader: UpdateDownloadingService, @unchecked S
             throw UpdateServiceError.downloadFailed("Mock network failure")
         }
         progressHandler(0.5)
+        if waitUntilCancelled {
+            onDownloadStarted?()
+            do {
+                try await Task.sleep(for: .seconds(10))
+            } catch is CancellationError {
+                didCancel = true
+                throw CancellationError()
+            }
+        }
         progressHandler(1.0)
         return downloadedURLToReturn
     }
@@ -120,6 +132,26 @@ struct UpdateTests {
         // Обработка некорректных строк
         #expect(SemanticVersion(fromString: "") == nil)
         #expect(SemanticVersion(fromString: "invalid") == nil)
+        #expect(SemanticVersion(fromString: "2.abc.0") == nil)
+        #expect(SemanticVersion(fromString: "2.0-") == nil)
+        #expect(SemanticVersion(fromString: "1.2.3.4") == nil)
+    }
+
+    @Test("SemVer 2.0: численное сравнение pre-release и поддержка build-метаданных")
+    func semanticVersionPrereleaseAndMetadata() {
+        let beta2 = SemanticVersion(fromString: "2.3.0-beta.2")
+        let beta10 = SemanticVersion(fromString: "2.3.0-beta.10")
+        let alpha = SemanticVersion(fromString: "2.3.0-alpha.99")
+        let withBuild = SemanticVersion(fromString: "v2.3.0+20261120")
+
+        #expect(beta2 != nil)
+        #expect(beta10 != nil)
+        #expect(alpha != nil)
+        #expect(withBuild == SemanticVersion(major: 2, minor: 3, patch: 0))
+
+        #expect(alpha! < beta2!)
+        #expect(beta2! < beta10!)
+        #expect(beta10! < withBuild!)
     }
 
     @Test("Парсинг JSON ответа GitHub Releases API с выделением .zip архива")
@@ -316,5 +348,68 @@ struct UpdateTests {
 
         #expect(mockInstaller.didCallInstall == true)
         #expect(store.downloadProgress == 1.0)
+    }
+
+    @Test("Отмена загрузки через dismiss сохраняет информацию о релизе и предотвращает установку")
+    @MainActor
+    func cancelDownloadOnDismissPreservesUpdateAndStopsInstall() async {
+        let newVersion = SemanticVersion(major: 2, minor: 3, patch: 0)
+        let sampleInfo = UpdateInfo(
+            version: newVersion,
+            rawTagName: "v2.3.0",
+            releaseTitle: "HiDpiSwitcher 2.3.0",
+            releaseNotes: "Список изменений сохраняется",
+            htmlURL: URL(string: "https://github.com/banzaez/hidpi-switcher")!,
+            downloadURL: URL(string: "https://github.com/banzaez/hidpi-switcher/releases/download/v2.3.0/HiDpiSwitcher-v2.3.0.zip")!
+        )
+
+        let mockChecker = MockUpdateChecker(resultToReturn: .success(.updateAvailable(sampleInfo)))
+        let mockDownloader = MockUpdateDownloader()
+        mockDownloader.waitUntilCancelled = true
+        let mockInstaller = MockUpdateInstaller()
+        let mockPrefs = MockUpdatePreferencesStore()
+        let mockPresenter = MockUpdatePresenter()
+
+        let store = UpdateStore(
+            updateChecker: mockChecker,
+            updateDownloader: mockDownloader,
+            updateInstaller: mockInstaller,
+            preferencesStore: mockPrefs,
+            presenter: mockPresenter
+        )
+
+        await store.checkForUpdates(manual: true)
+        #expect(store.availableUpdate == sampleInfo)
+
+        let startedStream = AsyncStream<Void> { continuation in
+            mockDownloader.onDownloadStarted = {
+                continuation.yield(())
+                continuation.finish()
+            }
+        }
+
+        let downloadTask = Task { @MainActor in
+            await store.downloadAndInstall()
+        }
+
+        for await _ in startedStream { break }
+
+        if case .downloading = store.state {
+            // Ожидаемое состояние во время загрузки
+        } else {
+            Issue.record("Ожидалось состояние .downloading, получено: \(store.state)")
+        }
+        #expect(store.availableUpdate == sampleInfo)
+        #expect(store.isUpdateAvailable == true)
+
+        store.dismiss()
+        await downloadTask.value
+
+        #expect(mockPresenter.didDismissUpdateDialog == true)
+        #expect(mockDownloader.didCancel == true)
+        #expect(mockInstaller.didCallInstall == false)
+        #expect(store.state == .updateAvailable(sampleInfo))
+        #expect(store.availableUpdate == sampleInfo)
+        #expect(store.lastErrorMessage == nil)
     }
 }

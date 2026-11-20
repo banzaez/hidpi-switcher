@@ -1,15 +1,14 @@
-import Foundation
 import AppKit
+import Foundation
+import os
 
 public enum UpdateServiceError: LocalizedError, Sendable {
     case invalidReleaseData
     case releaseParsingFailed(String)
-    case noValidDownloadAsset(String)
     case downloadFailed(String)
     case extractionFailed(String)
     case invalidExtractedBundle(String)
     case appDirectoryNotWritable(URL)
-    case installerScriptFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -17,8 +16,6 @@ public enum UpdateServiceError: LocalizedError, Sendable {
             return "Не удалось получить корректные данные о релизе с GitHub"
         case let .releaseParsingFailed(reason):
             return "Ошибка при разборе информации о релизе: \(reason)"
-        case let .noValidDownloadAsset(tag):
-            return "В релизе \(tag) не найден подходящий архив .zip с приложением"
         case let .downloadFailed(reason):
             return "Ошибка загрузки обновления: \(reason)"
         case let .extractionFailed(reason):
@@ -27,14 +24,50 @@ public enum UpdateServiceError: LocalizedError, Sendable {
             return "Распакованный архив не содержит корректного бандла HiDpiSwitcher.app: \(path)"
         case let .appDirectoryNotWritable(url):
             return "Папка приложения недоступна для записи (\(url.path)). Переместите HiDpiSwitcher в папку «Программы» (/Applications)."
-        case let .installerScriptFailed(reason):
-            return "Не удалось запустить скрипт обновления: \(reason)"
         }
     }
 }
 
+private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
+    private let progressHandler: @Sendable (Double) -> Void
+    private let lastReportedProgress = OSAllocatedUnfairLock<Double>(initialState: 0.0)
+
+    init(progressHandler: @escaping @Sendable (Double) -> Void) {
+        self.progressHandler = progressHandler
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let progress = min(1.0, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+        let shouldReport = lastReportedProgress.withLock { last -> Bool in
+            if progress - last >= 0.01 || progress >= 1.0 {
+                last = progress
+                return true
+            }
+            return false
+        }
+        if shouldReport {
+            progressHandler(progress)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        // Файл перемещается после завершения session.download(for:delegate:)
+    }
+}
+
 /// Сервис взаимодействия с GitHub Releases API и атомарного обновления бандла.
-public final class GitHubUpdateService: UpdateCheckingService, UpdateDownloadingService, UpdateInstallingService, @unchecked Sendable {
+public final class GitHubUpdateService: UpdateCheckingService, UpdateDownloadingService, UpdateInstallingService, Sendable {
     public static let defaultRepo = "banzaez/hidpi-switcher"
 
     private let repo: String
@@ -139,53 +172,32 @@ public final class GitHubUpdateService: UpdateCheckingService, UpdateDownloading
         request.setValue("HiDpiSwitcher", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 60
 
-        let (bytes, response) = try await session.bytes(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-            throw UpdateServiceError.downloadFailed("Сервер вернул статус \((response as? HTTPURLResponse)?.statusCode ?? 0)")
-        }
-
-        let expectedLength = response.expectedContentLength
-        let tempDir = FileManager.default.temporaryDirectory
-        let destinationURL = tempDir.appendingPathComponent("HiDpiSwitcher-Update-\(UUID().uuidString).zip")
-
-        FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
-        guard let fileHandle = try? FileHandle(forWritingTo: destinationURL) else {
-            throw UpdateServiceError.downloadFailed("Не удалось создать временный файл на диске")
-        }
-
-        var downloadedBytes: Int64 = 0
-        var buffer = Data()
-        buffer.reserveCapacity(64 * 1024)
-
-        var lastReportedProgress: Double = 0.0
         progressHandler(0.0)
+        let delegate = DownloadProgressDelegate(progressHandler: progressHandler)
+        let (tempDownloadedURL, response) = try await session.download(for: request, delegate: delegate)
 
-        for try await byte in bytes {
-            buffer.append(byte)
-            downloadedBytes += 1
+        let fileManager = FileManager.default
+        let destinationURL = fileManager.temporaryDirectory
+            .appendingPathComponent("HiDpiSwitcher-Update-\(UUID().uuidString).zip")
 
-            if buffer.count >= 64 * 1024 {
-                try fileHandle.write(contentsOf: buffer)
-                buffer.removeAll(keepingCapacity: true)
-
-                if expectedLength > 0 {
-                    let progress = min(1.0, Double(downloadedBytes) / Double(expectedLength))
-                    if progress - lastReportedProgress >= 0.01 || progress >= 1.0 {
-                        lastReportedProgress = progress
-                        progressHandler(progress)
-                    }
-                }
+        do {
+            try Task.checkCancellation()
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200...299).contains(httpResponse.statusCode) else {
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                throw UpdateServiceError.downloadFailed("Сервер вернул статус \(statusCode)")
             }
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.moveItem(at: tempDownloadedURL, to: destinationURL)
+            progressHandler(1.0)
+            return destinationURL
+        } catch {
+            try? fileManager.removeItem(at: tempDownloadedURL)
+            try? fileManager.removeItem(at: destinationURL)
+            throw error
         }
-
-        if !buffer.isEmpty {
-            try fileHandle.write(contentsOf: buffer)
-        }
-        try fileHandle.close()
-
-        progressHandler(1.0)
-        return destinationURL
     }
 
     // MARK: - UpdateInstallingService
@@ -229,19 +241,19 @@ public final class GitHubUpdateService: UpdateCheckingService, UpdateDownloading
         let scriptContent = """
         #!/bin/sh
         # Скрипт атомарной замены бандла HiDpiSwitcher и перезапуска
-        PID=\(currentPID)
-        DEST="\(currentAppURL.path)"
-        NEW_APP="\(extractedAppURL.path)"
-        STAGING="\(stagingDir.path)"
-        ARCHIVE="\(archiveURL.path)"
+        PID="$1"
+        DEST="$2"
+        NEW_APP="$3"
+        STAGING="$4"
+        ARCHIVE="$5"
 
         # Ждём завершения текущего процесса (макс. 10 сек)
         COUNT=0
-        while kill -0 $PID 2>/dev/null; do
+        while kill -0 "$PID" 2>/dev/null; do
             sleep 0.2
             COUNT=$((COUNT + 1))
-            if [ $COUNT -gt 50 ]; then
-                kill -9 $PID 2>/dev/null || true
+            if [ "$COUNT" -gt 50 ]; then
+                kill -9 "$PID" 2>/dev/null || true
                 break
             fi
         done
@@ -263,17 +275,19 @@ public final class GitHubUpdateService: UpdateCheckingService, UpdateDownloading
         """
 
         try scriptContent.write(to: scriptURL, atomically: true, encoding: .utf8)
-
-        let chmodProcess = Process()
-        chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        chmodProcess.arguments = ["+x", scriptURL.path]
-        try chmodProcess.run()
-        chmodProcess.waitUntilExit()
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
 
         // 5. Запуск отсоединённого процесса обновления в фоне
         let relaunchProcess = Process()
         relaunchProcess.executableURL = URL(fileURLWithPath: "/bin/sh")
-        relaunchProcess.arguments = [scriptURL.path]
+        relaunchProcess.arguments = [
+            scriptURL.path,
+            String(currentPID),
+            currentAppURL.path,
+            extractedAppURL.path,
+            stagingDir.path,
+            archiveURL.path
+        ]
         try relaunchProcess.run()
 
         // 6. Завершение работы текущего приложения

@@ -27,19 +27,34 @@ public struct SemanticVersion: Comparable, Equatable, Hashable, Sendable, Custom
             normalized.removeFirst()
         }
 
+        // Отсекаем суффикс build-метаданных (+...) согласно SemVer 2.0
+        if let plusIndex = normalized.firstIndex(of: "+") {
+            normalized = String(normalized[..<plusIndex])
+        }
+
         // Выделяем пре-релиз (после дефиса '-')
         var prereleasePart: String? = nil
         if let dashIndex = normalized.firstIndex(of: "-") {
-            prereleasePart = String(normalized[normalized.index(after: dashIndex)...])
+            let candidate = String(normalized[normalized.index(after: dashIndex)...])
+            guard !candidate.isEmpty else { return nil }
+            prereleasePart = candidate
             normalized = String(normalized[..<dashIndex])
         }
 
-        let components = normalized.split(separator: ".")
-        guard !components.isEmpty else { return nil }
+        let components = normalized.split(separator: ".", omittingEmptySubsequences: false)
+        guard !components.isEmpty, components.count <= 3 else { return nil }
 
-        guard let major = Int(components[0]) else { return nil }
-        let minor = components.count > 1 ? (Int(components[1]) ?? 0) : 0
-        let patch = components.count > 2 ? (Int(components[2]) ?? 0) : 0
+        guard let major = Int(components[0]), major >= 0 else { return nil }
+        var minor = 0
+        if components.count > 1 {
+            guard let parsedMinor = Int(components[1]), parsedMinor >= 0 else { return nil }
+            minor = parsedMinor
+        }
+        var patch = 0
+        if components.count > 2 {
+            guard let parsedPatch = Int(components[2]), parsedPatch >= 0 else { return nil }
+            patch = parsedPatch
+        }
 
         self.major = major
         self.minor = minor
@@ -75,8 +90,28 @@ public struct SemanticVersion: Comparable, Equatable, Hashable, Sendable, Custom
         case (.none, .some):
             return false
         case let (.some(lPre), .some(rPre)):
-            return lPre < rPre
+            return comparePrerelease(lPre, rPre)
         }
+    }
+
+    private static func comparePrerelease(_ lhs: String, _ rhs: String) -> Bool {
+        let lParts = lhs.split(separator: ".", omittingEmptySubsequences: false)
+        let rParts = rhs.split(separator: ".", omittingEmptySubsequences: false)
+
+        for (lPart, rPart) in zip(lParts, rParts) {
+            if lPart == rPart { continue }
+            switch (UInt64(lPart), UInt64(rPart)) {
+            case let (.some(l), .some(r)):
+                return l < r
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                return lPart < rPart
+            }
+        }
+        return lParts.count < rParts.count
     }
 
     public static func == (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
@@ -125,10 +160,7 @@ public struct UpdateInfo: Equatable, Sendable, Identifiable {
 
     public var formattedSize: String? {
         guard let bytes = assetSizeBytes, bytes > 0 else { return nil }
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useMB, .useKB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 

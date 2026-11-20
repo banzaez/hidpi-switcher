@@ -2,6 +2,15 @@ import AppKit
 import Foundation
 import Observation
 
+/// Протокол презентера диалогов обновления.
+@MainActor
+public protocol UpdateDialogPresenter: AnyObject {
+    func showUpdateDialog(store: UpdateStore)
+    func dismissUpdateDialog()
+    func showUpToDateAlert(version: SemanticVersion)
+    func showErrorAlert(message: String, releaseURL: URL?)
+}
+
 /// Состояние процесса обновления.
 public enum UpdateState: Equatable, Sendable {
     case idle
@@ -23,29 +32,47 @@ public final class UpdateStore {
     public let currentVersion: SemanticVersion
     private let currentAppURL: URL
 
+    @ObservationIgnored
     private let updateChecker: UpdateCheckingService
+    @ObservationIgnored
     private let updateDownloader: UpdateDownloadingService
+    @ObservationIgnored
     private let updateInstaller: UpdateInstallingService
+    @ObservationIgnored
     private let preferencesStore: UpdatePreferencesStore
+    @ObservationIgnored
     private weak var presenter: (any UpdateDialogPresenter)?
+    @ObservationIgnored
+    private var latestUpdateInfo: UpdateInfo?
+    @ObservationIgnored
+    private var activeDownloadTask: Task<URL, Error>?
+    @ObservationIgnored
+    private var isDownloadCancelled = false
 
     public init(
         currentVersion: SemanticVersion? = nil,
         currentAppURL: URL? = nil,
-        updateChecker: UpdateCheckingService = GitHubUpdateService(),
-        updateDownloader: UpdateDownloadingService = GitHubUpdateService(),
-        updateInstaller: UpdateInstallingService = GitHubUpdateService(),
+        updateChecker: UpdateCheckingService? = nil,
+        updateDownloader: UpdateDownloadingService? = nil,
+        updateInstaller: UpdateInstallingService? = nil,
         preferencesStore: UpdatePreferencesStore = UserDefaultsUpdatePreferencesStore(),
         presenter: (any UpdateDialogPresenter)? = nil
     ) {
         let versionString = currentVersion?.rawString
             ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
-            ?? "2.2.0"
-        self.currentVersion = currentVersion ?? SemanticVersion(fromString: versionString) ?? SemanticVersion(major: 2, minor: 2, patch: 0)
+            ?? "2.4.0"
+        self.currentVersion = currentVersion
+            ?? SemanticVersion(fromString: versionString)
+            ?? SemanticVersion(major: 2, minor: 4, patch: 0)
         self.currentAppURL = currentAppURL ?? Bundle.main.bundleURL
-        self.updateChecker = updateChecker
-        self.updateDownloader = updateDownloader
-        self.updateInstaller = updateInstaller
+
+        let sharedService: GitHubUpdateService? =
+            (updateChecker == nil || updateDownloader == nil || updateInstaller == nil)
+            ? GitHubUpdateService()
+            : nil
+        self.updateChecker = updateChecker ?? sharedService!
+        self.updateDownloader = updateDownloader ?? sharedService!
+        self.updateInstaller = updateInstaller ?? sharedService!
         self.preferencesStore = preferencesStore
         self.presenter = presenter
     }
@@ -60,10 +87,14 @@ public final class UpdateStore {
     }
 
     public var availableUpdate: UpdateInfo? {
-        if case let .updateAvailable(info) = state {
+        switch state {
+        case let .updateAvailable(info):
             return info
+        case .downloading:
+            return latestUpdateInfo
+        case .idle, .checking, .upToDate, .error:
+            return nil
         }
-        return nil
     }
 
     public var isUpdateAvailable: Bool {
@@ -74,6 +105,7 @@ public final class UpdateStore {
     /// - Parameter manual: `true` — если проверку вызвал пользователь из меню; `false` — фоновая автопроверка при старте.
     public func checkForUpdates(manual: Bool = false) async {
         guard state != .checking else { return }
+        if case .downloading = state { return }
 
         if !manual {
             guard preferencesStore.automaticallyCheckForUpdates else { return }
@@ -87,6 +119,7 @@ public final class UpdateStore {
         state = .checking
         lastErrorMessage = nil
         downloadProgress = 0.0
+        latestUpdateInfo = nil
 
         do {
             let result = try await updateChecker.checkForUpdates(currentVersion: currentVersion)
@@ -94,6 +127,7 @@ public final class UpdateStore {
 
             switch result {
             case let .upToDate(version):
+                latestUpdateInfo = nil
                 state = .upToDate(version)
                 if manual {
                     presenter?.showUpToDateAlert(version: version)
@@ -103,15 +137,18 @@ public final class UpdateStore {
                 // Если пользователь выбрал «Пропустить эту версию» для фоновой проверки — не беспокоим его
                 if !manual, let skipped = preferencesStore.skippedVersion {
                     if let skippedVer = SemanticVersion(fromString: skipped), skippedVer == info.version {
+                        latestUpdateInfo = nil
                         state = .idle
                         return
                     }
                 }
 
+                latestUpdateInfo = info
                 state = .updateAvailable(info)
                 presenter?.showUpdateDialog(store: self)
             }
         } catch {
+            latestUpdateInfo = nil
             state = .error(error.localizedDescription)
             lastErrorMessage = error.localizedDescription
             if manual {
@@ -131,7 +168,7 @@ public final class UpdateStore {
 
     /// Загружает и устанавливает найденное обновление.
     public func downloadAndInstall() async {
-        guard let update = availableUpdate else { return }
+        guard case .updateAvailable = state, let update = availableUpdate else { return }
 
         guard let downloadURL = update.downloadURL else {
             // Если в релизе нет прямого .zip архива, открываем страницу GitHub Releases в браузере
@@ -139,30 +176,69 @@ public final class UpdateStore {
             return
         }
 
+        latestUpdateInfo = update
+        isDownloadCancelled = false
         state = .downloading(progress: 0.0)
         downloadProgress = 0.0
         lastErrorMessage = nil
 
-        do {
-            let localZipURL = try await updateDownloader.downloadUpdate(from: downloadURL) { [weak self] progress in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.downloadProgress = progress
-                    self.state = .downloading(progress: progress)
-                }
+        let downloader = updateDownloader
+        let progressCallback: @Sendable (Double) -> Void = { [weak self] progress in
+            Task { @MainActor [weak self] in
+                guard let self, !self.isDownloadCancelled, case .downloading = self.state else { return }
+                let clamped = min(1.0, max(self.downloadProgress, progress))
+                self.downloadProgress = clamped
+                self.state = .downloading(progress: clamped)
             }
+        }
+        let task = Task<URL, Error> {
+            try await downloader.downloadUpdate(from: downloadURL, progressHandler: progressCallback)
+        }
+        activeDownloadTask = task
+
+        var downloadedArchiveURL: URL?
+        do {
+            let localZipURL = try await task.value
+            downloadedArchiveURL = localZipURL
+            activeDownloadTask = nil
+
+            guard !isDownloadCancelled, !Task.isCancelled else {
+                try? FileManager.default.removeItem(at: localZipURL)
+                state = .updateAvailable(update)
+                downloadProgress = 0.0
+                return
+            }
+
+            downloadProgress = 1.0
+            state = .downloading(progress: 1.0)
 
             // Атомарная установка и перезапуск
             try updateInstaller.installAndRelaunch(from: localZipURL, currentAppURL: currentAppURL)
-        } catch {
+        } catch is CancellationError {
+            activeDownloadTask = nil
+            if let url = downloadedArchiveURL {
+                try? FileManager.default.removeItem(at: url)
+            }
             state = .updateAvailable(update)
-            lastErrorMessage = error.localizedDescription
+            downloadProgress = 0.0
+        } catch {
+            activeDownloadTask = nil
+            if let url = downloadedArchiveURL {
+                try? FileManager.default.removeItem(at: url)
+            }
+            state = .updateAvailable(update)
+            downloadProgress = 0.0
+            if !isDownloadCancelled {
+                lastErrorMessage = error.localizedDescription
+            }
         }
     }
 
     /// Пропустить указанную версию.
     public func skipVersion(_ version: SemanticVersion) {
         preferencesStore.setSkippedVersion(version.rawString)
+        latestUpdateInfo = nil
+        state = .idle
         dismiss()
     }
 
@@ -180,11 +256,15 @@ public final class UpdateStore {
         presenter?.showUpdateDialog(store: self)
     }
 
-    /// Скрыть диалог обновления.
+    /// Скрыть диалог обновления (и отменить активную загрузку, если она выполняется).
     public func dismiss() {
         presenter?.dismissUpdateDialog()
         if case .downloading = state {
-            state = availableUpdate.map { .updateAvailable($0) } ?? .idle
+            isDownloadCancelled = true
+            activeDownloadTask?.cancel()
+            activeDownloadTask = nil
+            state = latestUpdateInfo.map { .updateAvailable($0) } ?? .idle
+            downloadProgress = 0.0
         }
     }
 }

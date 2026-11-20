@@ -19,8 +19,8 @@ struct RevertConfirmationView: View {
 
                     if let current = store.currentMode {
                         VStack(alignment: .leading, spacing: 4) {
-                            if let device = store.selectedDevice {
-                                Text(device.name)
+                            if let device = store.effectivePhysicalDevice ?? store.selectedDevice {
+                                Text(device.cleanName)
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             }
@@ -93,10 +93,40 @@ struct RevertConfirmationView: View {
     }
 }
 
-/// Специальная панель с гарантированной поддержкой фокуса ввода и шорткатов клавиатуры.
-private final class KeyPanel: NSPanel {
+/// Специальная плавающая панель с гарантированной поддержкой фокуса ввода и шорткатов клавиатуры.
+@MainActor
+final class FloatingKeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    static func make<Content: View>(
+        title: String,
+        level: NSWindow.Level,
+        rootView: Content,
+        delegate: NSWindowDelegate
+    ) -> FloatingKeyPanel {
+        let hostingController = NSHostingController(rootView: rootView)
+        let fittingSize = hostingController.view.fittingSize
+
+        let panel = FloatingKeyPanel(
+            contentRect: NSRect(origin: .zero, size: fittingSize),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = title
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
+        panel.isFloatingPanel = true
+        panel.level = level
+        panel.isMovableByWindowBackground = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.contentViewController = hostingController
+        panel.setContentSize(fittingSize)
+        panel.isReleasedWhenClosed = false
+        panel.delegate = delegate
+        return panel
+    }
 }
 
 /// Контроллер отдельного системного диалога подтверждения разрешения (macOS Floating NSPanel).
@@ -119,27 +149,12 @@ public final class RevertConfirmationPresenter: NSObject, RevertDialogPresenter,
             return
         }
 
-        let contentView = RevertConfirmationView(store: store)
-        let hostingController = NSHostingController(rootView: contentView)
-        let fittingSize = hostingController.view.fittingSize
-
-        let newPanel = KeyPanel(
-            contentRect: NSRect(origin: .zero, size: fittingSize),
-            styleMask: [.titled, .closable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
+        let newPanel = FloatingKeyPanel.make(
+            title: "Проверка параметров экрана",
+            level: .modalPanel,
+            rootView: RevertConfirmationView(store: store),
+            delegate: self
         )
-        newPanel.title = "Проверка параметров экрана"
-        newPanel.titlebarAppearsTransparent = true
-        newPanel.titleVisibility = .hidden
-        newPanel.isFloatingPanel = true
-        newPanel.level = .modalPanel
-        newPanel.isMovableByWindowBackground = true
-        newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        newPanel.contentViewController = hostingController
-        newPanel.setContentSize(fittingSize)
-        newPanel.isReleasedWhenClosed = false
-        newPanel.delegate = self
 
         self.panel = newPanel
         updatePanelPosition(for: store.selectedDisplayID)
@@ -165,13 +180,7 @@ public final class RevertConfirmationPresenter: NSObject, RevertDialogPresenter,
         guard let panel else { return }
 
         // Центрируем диалог на целевом экране, на котором тестируется разрешение
-        let screenKey = NSDeviceDescriptionKey("NSScreenNumber")
-        let targetScreen = NSScreen.screens.first { screen in
-            guard let screenNumber = (screen.deviceDescription[screenKey] as? NSNumber)?.uint32Value else {
-                return false
-            }
-            return screenNumber == displayID
-        } ?? NSScreen.main
+        let targetScreen = NSScreen.screen(for: displayID) ?? NSScreen.main
 
         if let targetScreen {
             let visibleFrame = targetScreen.visibleFrame

@@ -25,7 +25,7 @@ struct MenuBarContentView: View {
 
         // 1. Выбор монитора (если подключено более одного)
         if displayStore.connectedDisplays.count > 1 {
-            Menu("Выбор экрана: \(displayStore.selectedDevice?.name ?? "Экран")") {
+            Menu("Выбор экрана: \(displayStore.selectedDevice?.cleanName ?? "Экран")") {
                 Picker("Экран", selection: displaySelectionBinding) {
                     ForEach(displayStore.connectedDisplays) { device in
                         Text(device.menuTitle)
@@ -42,8 +42,7 @@ struct MenuBarContentView: View {
         if let current = displayStore.currentMode {
             VStack(alignment: .leading, spacing: 2) {
                 if let curDevice = displayStore.effectivePhysicalDevice ?? displayStore.selectedDevice {
-                    let cleanName = curDevice.name.replacingOccurrences(of: " (HiDPI)", with: "")
-                    Text(displayStore.isVirtualHiDPIActive ? "\(cleanName) • Виртуальный HiDPI" : cleanName)
+                    Text(displayStore.isVirtualHiDPIActive ? "\(curDevice.cleanName) • Виртуальный HiDPI" : curDevice.cleanName)
                         .font(.headline)
                 }
                 Text("Разрешение: \(current.width) × \(current.height)")
@@ -62,8 +61,8 @@ struct MenuBarContentView: View {
                 .foregroundStyle(.green)
         }
 
-        if displayStore.hidpiModes.isEmpty, displayStore.currentMode != nil {
-            Text("ℹ️ Нет родных HiDPI ≥ 1280px — включите «2K / Ultrawide HiDPI» ниже")
+        if displayStore.needsVirtualHiDPIHint {
+            Text("ℹ️ Нет рабочих HiDPI-режимов — включите «Виртуальный HiDPI-буфер» ниже")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -97,18 +96,13 @@ struct MenuBarContentView: View {
         // 6. Отдельный переключатель частоты обновления (Hz) для текущего разрешения
         if displayStore.availableRefreshRates.count > 1,
            let current = displayStore.currentMode {
-            Menu("Частота обновления: \(current.refreshRateTitle)") {
-                ForEach(displayStore.availableRefreshRates) { mode in
-                    Button {
-                        displayStore.setRefreshRate(mode.freq)
-                    } label: {
-                        if mode.freq == current.freq {
-                            Text("✓ \(mode.refreshRateTitle)")
-                        } else {
-                            Text(mode.refreshRateTitle)
-                        }
-                    }
-                }
+            ModeMenu(
+                title: "Частота обновления: \(current.refreshRateTitle)",
+                modes: displayStore.availableRefreshRates,
+                currentID: current.id,
+                labelProvider: \.refreshRateTitle
+            ) { mode in
+                displayStore.setRefreshRate(mode.freq)
             }
         }
 
@@ -161,23 +155,14 @@ struct MenuBarContentView: View {
                    : "Виртуальный HiDPI-буфер (2K / Ultrawide)") {
                 // Выполняем асинхронно после закрытия меню macOS, чтобы WindowServer
                 // вышел из модального Menu Tracking Loop и не отклонял реконфигурацию экранов
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(100))
                     displayStore.toggleVirtualHiDPI()
                 }
             }
             .disabled(!displayStore.canManageVirtualHiDPI)
 
             Menu("Системный профиль Override") {
-                Button(displayStore.isVirtualHiDPIActive
-                       ? "✓ Виртуальный HiDPI-буфер активен (отключить)"
-                       : "Включить виртуальный HiDPI-буфер (мгновенно)") {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        displayStore.toggleVirtualHiDPI()
-                    }
-                }
-
-                Divider()
-
                 Button(displayStore.hasInstalledSystemOverride
                        ? "Удалить системный профиль Override..."
                        : "Установить системный профиль Override...") {

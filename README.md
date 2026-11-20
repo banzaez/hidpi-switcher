@@ -14,7 +14,7 @@
   <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift" alt="Swift 6.0"></a>
   <a href="https://github.com/banzaez/hidpi-switcher/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-34C759.svg" alt="License: MIT"></a>
   <a href="https://github.com/banzaez/hidpi-switcher"><img src="https://img.shields.io/badge/Architecture-Universal%20(Apple%20Silicon%20%2B%20Intel)-6851FF" alt="Universal Binary"></a>
-  <a href="https://github.com/banzaez/hidpi-switcher"><img src="https://img.shields.io/badge/Unit%20Tests-23%20passed-34C759" alt="Tests"></a>
+  <a href="https://github.com/banzaez/hidpi-switcher"><img src="https://img.shields.io/badge/Unit%20Tests-29%20passed-34C759" alt="Tests"></a>
 </p>
 
 <p align="center">
@@ -63,7 +63,7 @@ Instead of a bloated list with redundant entries for every frequency, HiDpiSwitc
 - **Engine A: Instant Virtual Framebuffer (`CGVirtualDisplay` + Hardware Mirroring)**  
   Creates a virtual Retina buffer paired with hardware display mirroring. Requires **no system reboot** and **no SIP tampering**. It unlocks fractional supersampling presets (e.g., `2752×1152 HiDPI` on 3440×1440 Ultrawides, `2048×1152 HiDPI` on 2560×1440 2K panels) for razor-sharp typography.
 - **Engine B: Native System Display Override Generator**  
-  Generates optimized binary `scale-resolutions` plists (triplicates: base 8-byte, HiDPI 16-byte, and scaled Retina 16-byte records) in `/Library/Displays/Contents/Resources/Overrides` for persistent driver-level recognition.
+  Generates optimized binary `scale-resolutions` plists (pure 16-byte HiDPI backing & logical pairs with `0x00200000` flag, omitting conflicting 8-byte Low-Res records) in `/Library/Displays/Contents/Resources/Overrides` for persistent driver-level recognition.
 
 ### 4. Interactive 10-Second Rollback Safety Dialog
 Switching to an unverified mode triggers a floating countdown panel:
@@ -138,7 +138,7 @@ Sources/
 
 - **Zero-Allocation SkyLight Private CGS API**: Direct bindings to Apple's private CGS display functions (`CGSGetCurrentDisplayMode`, `CGSConfigureDisplayMode`, `CGSGetNumberOfDisplayModes`, `CGSGetDisplayModeDescriptionOfLength`) using `@_silgen_name` and stack-allocated `CGSModeRaw` memory buffers (`0xD4` / `0xDC` byte layout). This avoids heap allocations and Objective-C runtime overhead when querying display modes.
 - **Swift 6 Strict Concurrency**: All models conform to `Sendable`, background work is strictly isolated, and state stores are bound to `@MainActor`.
-- **Swift Testing Suite**: 23 automated unit tests verifying CGS binary layouts, aspect ratio algorithms, mode grouping, portrait display logic, and SemVer update checks.
+- **Swift Testing Suite**: 29 automated unit tests verifying CGS binary layouts, aspect ratio algorithms, mode grouping, portrait display logic, and SemVer update checks.
 
 ---
 

@@ -452,6 +452,154 @@ struct ModeResolverTests {
         store.refreshDisplays()
         #expect(mockClient.allModesCallCount == initialCalls + 1)
     }
+
+    @Test("При первом запуске без сохранённого preferredDisplayID выбирается внешний монитор вместо встроенного главного")
+    @MainActor
+    func firstLaunchPrioritizesExternalOverBuiltinMainDisplay() {
+        let mainBuiltinID = CGMainDisplayID()
+        let externalID = mainBuiltinID &+ 100
+
+        let mockClient = MockHardwareClient()
+        mockClient.customDisplays = [
+            DisplayDevice(id: mainBuiltinID, name: "Built-in Retina", isMain: true, isBuiltin: true),
+            DisplayDevice(id: externalID, name: "Dell U2724D", isMain: false, isBuiltin: false)
+        ]
+
+        let mockPrefs = MockPreferencesStore()
+        mockPrefs.preferredDisplayID = nil
+
+        let store = DisplayStore(
+            hardwareClient: mockClient,
+            preferencesStore: mockPrefs,
+            hotKeyService: MockHotKeyService(),
+            virtualHiDPIService: MockVirtualHiDPIService(),
+            overrideInstaller: MockOverrideInstaller(),
+            revertTimeoutSeconds: 0
+        )
+
+        #expect(store.selectedDisplayID == externalID)
+        #expect(store.isBuiltinSelected == false)
+    }
+
+    @Test("При активном виртуальном дисплее физический slave-дубль скрывается из списка экранов")
+    @MainActor
+    func virtualDisplayHidesDuplicatePhysicalMonitor() {
+        let mockClient = MockHardwareClient()
+        let mockVirtual = MockVirtualHiDPIService()
+        let virtualID: CGDirectDisplayID = 200
+        mockVirtual.virtualIDByPhysicalID = [2: virtualID]
+        mockClient.dynamicDisplaysProvider = {
+            if mockVirtual.activeIDs.contains(2) {
+                return [
+                    DisplayDevice(id: 1, name: "Built-in Retina", isMain: false, isBuiltin: true),
+                    DisplayDevice(id: 2, name: "LG UltraFine 4K", isMain: false, isBuiltin: false),
+                    DisplayDevice(id: virtualID, name: "LG UltraFine 4K (HiDPI)", isMain: true, isBuiltin: false)
+                ]
+            }
+            return [
+                DisplayDevice(id: 1, name: "Built-in Retina", isMain: false, isBuiltin: true),
+                DisplayDevice(id: 2, name: "LG UltraFine 4K", isMain: true, isBuiltin: false)
+            ]
+        }
+
+        let store = DisplayStore(
+            hardwareClient: mockClient,
+            preferencesStore: MockPreferencesStore(),
+            hotKeyService: MockHotKeyService(),
+            virtualHiDPIService: mockVirtual,
+            overrideInstaller: MockOverrideInstaller(),
+            revertTimeoutSeconds: 0
+        )
+
+        #expect(store.connectedDisplays.map(\.id) == [1, 2])
+
+        store.toggleVirtualHiDPI()
+        #expect(store.isVirtualHiDPIActive == true)
+        #expect(store.selectedDisplayID == virtualID)
+        #expect(store.connectedDisplays.map(\.id) == [1, virtualID])
+
+        store.toggleVirtualHiDPI()
+        #expect(store.isVirtualHiDPIActive == false)
+        #expect(store.selectedDisplayID == 2)
+        #expect(store.connectedDisplays.map(\.id) == [1, 2])
+    }
+
+    @Test("Переключение на другой экран во время таймера подтверждения откатывает непроверенный режим")
+    @MainActor
+    func switchingDisplayDuringRevertTimerRevertsUnconfirmedMode() {
+        let mockClient = MockHardwareClient()
+        let mockPrefs = MockPreferencesStore()
+        let mockPresenter = MockRevertPresenter()
+        let externalDevice = DisplayDevice(id: 2, name: "LG UltraFine 4K", isMain: true, isBuiltin: false)
+
+        let store = DisplayStore(
+            hardwareClient: mockClient,
+            preferencesStore: mockPrefs,
+            hotKeyService: MockHotKeyService(),
+            virtualHiDPIService: MockVirtualHiDPIService(),
+            overrideInstaller: MockOverrideInstaller(),
+            revertTimeoutSeconds: 10,
+            revertPresenter: mockPresenter
+        )
+
+        store.toggleHiDPI()
+        #expect(store.currentMode?.id == 20)
+        #expect(store.pendingRevertSeconds == 10)
+        #expect(mockPresenter.showCallCount == 1)
+
+        // Выбор другого монитора не должен подтверждать непроверенный режим 20
+        store.selectDisplay(1)
+
+        #expect(store.selectedDisplayID == 1)
+        #expect(store.pendingRevertSeconds == nil)
+        #expect(mockPresenter.dismissCallCount == 1)
+        #expect(mockClient.lastAppliedModeID == 10)
+        #expect(mockPrefs.preferredModeKey(for: externalDevice) == nil)
+        let unconfirmedKey = ModeKey(width: 1920, height: 1080, freq: 60, isHiDPI: true)
+        #expect(!mockPrefs.verifiedModeKeys(for: externalDevice).contains(unconfirmedKey))
+    }
+
+    @Test("Подсказка виртуального HiDPI определяется по отсутствию промежуточных Retina-режимов (70%–95%)")
+    @MainActor
+    func needsVirtualHiDPIHintDetectsMissingIntermediateModes() {
+        let mockClient = MockHardwareClient()
+        var includeIntermediate = false
+        mockClient.dynamicModesProvider = { displayID in
+            if displayID == 1 {
+                return [
+                    DisplayMode(id: 1, width: 1440, height: 900, freq: 60, density: 2.0, isHiDPI: true)
+                ]
+            }
+            var modes = [
+                DisplayMode(id: 10, width: 2560, height: 1440, freq: 100, density: 1.0, isHiDPI: false),
+                DisplayMode(id: 11, width: 1280, height: 720, freq: 100, density: 2.0, isHiDPI: true)
+            ]
+            if includeIntermediate {
+                modes.append(DisplayMode(id: 12, width: 2048, height: 1152, freq: 100, density: 2.0, isHiDPI: true))
+            }
+            return modes
+        }
+
+        let store = DisplayStore(
+            hardwareClient: mockClient,
+            preferencesStore: MockPreferencesStore(),
+            hotKeyService: MockHotKeyService(),
+            virtualHiDPIService: MockVirtualHiDPIService(),
+            overrideInstaller: MockOverrideInstaller(),
+            revertTimeoutSeconds: 0
+        )
+
+        #expect(ModeResolver.hasIntermediateHiDPIModes(in: store.availableModes, nativeWidth: 2560, nativeHeight: 1440) == false)
+        #expect(store.needsVirtualHiDPIHint == true)
+
+        includeIntermediate = true
+        store.refreshDisplays()
+        #expect(ModeResolver.hasIntermediateHiDPIModes(in: store.availableModes, nativeWidth: 2560, nativeHeight: 1440) == true)
+        #expect(store.needsVirtualHiDPIHint == false)
+
+        store.selectDisplay(1)
+        #expect(store.needsVirtualHiDPIHint == false)
+    }
 }
 
 // MARK: - Тестовые дублёры (Mocks)
@@ -461,9 +609,18 @@ private final class MockHardwareClient: DisplayHardwareClientProtocol {
     var currentID: Int = 10
     var lastAppliedModeID: Int?
     var allModesCallCount: Int = 0
+    var customDisplays: [DisplayDevice]?
+    var dynamicDisplaysProvider: (() -> [DisplayDevice])?
+    var dynamicModesProvider: ((CGDirectDisplayID) -> [DisplayMode])?
 
     func activeDisplays() -> [DisplayDevice] {
-        [
+        if let dynamicDisplaysProvider {
+            return dynamicDisplaysProvider()
+        }
+        if let customDisplays {
+            return customDisplays
+        }
+        return [
             DisplayDevice(id: 1, name: "Built-in Retina", isMain: false, isBuiltin: true),
             DisplayDevice(id: 2, name: "LG UltraFine 4K", isMain: true, isBuiltin: false)
         ]
@@ -475,6 +632,9 @@ private final class MockHardwareClient: DisplayHardwareClientProtocol {
 
     func allModes(for displayID: CGDirectDisplayID) -> [DisplayMode] {
         allModesCallCount += 1
+        if let dynamicModesProvider {
+            return dynamicModesProvider(displayID)
+        }
         return [
             DisplayMode(id: 10, width: 1920, height: 1080, freq: 60, density: 1.0, isHiDPI: false),
             DisplayMode(id: 11, width: 1920, height: 1080, freq: 120, density: 1.0, isHiDPI: false),
@@ -546,17 +706,29 @@ private final class MockHotKeyService: GlobalHotKeyServiceProtocol {
 @MainActor
 private final class MockVirtualHiDPIService: VirtualHiDPIServiceProtocol {
     var activeIDs: Set<CGDirectDisplayID> = []
+    var virtualIDByPhysicalID: [CGDirectDisplayID: CGDirectDisplayID] = [:]
+    private var devicesByPhysicalID: [CGDirectDisplayID: DisplayDevice] = [:]
 
     func isVirtualHiDPIActive(for physicalDisplayID: CGDirectDisplayID) -> Bool {
-        activeIDs.contains(physicalDisplayID)
+        if activeIDs.contains(physicalDisplayID) {
+            return true
+        }
+        return virtualIDByPhysicalID.contains { activeIDs.contains($0.key) && $0.value == physicalDisplayID }
     }
 
     func virtualDisplayID(for physicalDisplayID: CGDirectDisplayID) -> CGDirectDisplayID? {
-        activeIDs.contains(physicalDisplayID) ? physicalDisplayID : nil
+        guard activeIDs.contains(physicalDisplayID) else { return nil }
+        return virtualIDByPhysicalID[physicalDisplayID] ?? physicalDisplayID
     }
 
     func physicalDevice(for displayID: CGDirectDisplayID) -> DisplayDevice? {
-        nil
+        if let direct = devicesByPhysicalID[displayID] {
+            return direct
+        }
+        if let physicalID = virtualIDByPhysicalID.first(where: { $0.value == displayID })?.key {
+            return devicesByPhysicalID[physicalID]
+        }
+        return nil
     }
 
     func nativeResolution(for displayID: CGDirectDisplayID) -> (width: Int, height: Int)? {
@@ -571,17 +743,21 @@ private final class MockVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         additionalRefreshRates: [Double] = []
     ) -> CGDirectDisplayID? {
         activeIDs.insert(device.id)
-        return device.id
+        devicesByPhysicalID[device.id] = device
+        return virtualIDByPhysicalID[device.id] ?? device.id
     }
 
     @discardableResult
     func disableVirtualHiDPI(for physicalDisplayID: CGDirectDisplayID) -> CGDirectDisplayID? {
-        guard activeIDs.remove(physicalDisplayID) != nil else { return nil }
-        return physicalDisplayID
+        let physicalID = virtualIDByPhysicalID.first(where: { $0.value == physicalDisplayID })?.key ?? physicalDisplayID
+        guard activeIDs.remove(physicalID) != nil else { return nil }
+        devicesByPhysicalID.removeValue(forKey: physicalID)
+        return physicalID
     }
 
     func disableAll() {
         activeIDs.removeAll()
+        devicesByPhysicalID.removeAll()
     }
 }
 

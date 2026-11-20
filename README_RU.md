@@ -27,7 +27,7 @@
   - **Мгновенный виртуальный HiDPI-фреймбуфер (`CGVirtualDisplay` + Hardware Mirroring)** — без перезагрузки и без прав администратора создаёт Retina-буфер и сразу включает оптимальный суперсэмплинг (`2752×1152 HiDPI` для Ultrawide 3440×1440, `2048×1152 HiDPI` для 2K 2560×1440). Поддерживает частоту обновления физической панели (`100Hz`, `60Hz`, `50Hz`) и сохраняет состояние при перезапуске.
   - **Улучшенное суперсэмплинг-сглаживание шрифтов**: идеальная чёткость текста при масштабировании за счёт пропорционального субпиксельного рендеринга (1 поинт = 1.25 физических пикселей матрицы).
   - **Фильтрация искажённых соотношений сторон**: автоматическое отсечение чужих форматов (4:3 на 21:9 мониторах) и технических 2x backing-буферов больше нативной матрицы.
-  - **Установка системного профиля Override (`scale-resolutions`)** — генерирует расширенные триплеты бинарных записей `scale-resolutions` (8-byte + 16-byte HiDPI + 16-byte Retina scaled) для системной папки Overrides.
+  - **Установка системного профиля Override (`scale-resolutions`)** — генерирует чистые 16-байтные бинарные пары `scale-resolutions` (2x backing + 1x logical с флагом HiDPI `0x00200000`, без конфликтующих 8-байтных Low-Res записей) для системной папки Overrides.
 
 ## Стек и архитектура (2026)
 
@@ -38,7 +38,7 @@
   - `Sources/Infrastructure` — системный мост `CGSPrivate`, `DisplayHardwareClient` (`AsyncStream` событий реконфигурации CoreGraphics), `CarbonGlobalHotKeyService` (`RegisterEventHotKey` без запроса прав Accessibility), `DisplayPreferencesStore` / `UpdatePreferencesStore` (`UserDefaults`) и `GitHubUpdateService` (URLSession, `ditto` распаковка, атомарный скрипт перезапуска).
   - `Sources/Application` — `@Observable @MainActor` сторы (`DisplayStore` с дебаунсингом событий монитора, `LaunchAtLoginStore` поверх `SMAppService` и `UpdateStore` с поддержкой ручной/фоновой проверки и инсталляции).
   - `Sources/Presentation` — декларативный SwiftUI-интерфейс (`HiDpiApp`, `ModeMenu` со стабильными кнопками-переключателями, отдельный модальный `RevertConfirmationDialog` на `NSPanel`, нативное окно обновления `UpdateDialogView` / `UpdatePresenter`, `DisplayFormatters`).
-- **Swift Testing (`@Test`, `#expect`)**: 23 модульных теста (раскладка памяти ABI CGS, группировка частот, портретные мониторы, избранные пресеты, автовосстановление, таймер отката, семантическое версионирование, парсинг GitHub Releases и цепочка автообновления).
+- **Swift Testing (`@Test`, `#expect`)**: 29 модульных тестов (раскладка памяти ABI CGS, группировка частот, портретные мониторы, избранные пресеты, автовосстановление, таймер отката, семантическое версионирование, парсинг GitHub Releases и цепочка автообновления).
 
 ## Требования
 

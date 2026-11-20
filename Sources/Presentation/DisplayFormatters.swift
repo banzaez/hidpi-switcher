@@ -4,9 +4,9 @@ extension DisplayDevice {
     /// Заголовок экрана для меню выбора.
     var menuTitle: String {
         if isBuiltin {
-            return "\(name) (Встроенный)"
+            return "\(cleanName) (Встроенный)"
         }
-        return name
+        return cleanName
     }
 }
 

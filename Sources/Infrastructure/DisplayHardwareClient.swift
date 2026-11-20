@@ -101,17 +101,28 @@ public struct LiveDisplayHardwareClient: DisplayHardwareClientProtocol {
     }
 
     private static func buildScreenNamesMap() -> [CGDirectDisplayID: String] {
-        let key = NSDeviceDescriptionKey("NSScreenNumber")
         var map: [CGDirectDisplayID: String] = [:]
         map.reserveCapacity(NSScreen.screens.count)
 
         for screen in NSScreen.screens {
-            guard let id = (screen.deviceDescription[key] as? NSNumber)?.uint32Value else { continue }
+            guard let id = screen.displayID else { continue }
             let localized = screen.localizedName
             if !localized.isEmpty {
                 map[id] = localized
             }
         }
         return map
+    }
+}
+
+extension NSScreen {
+    private static let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
+
+    public var displayID: CGDirectDisplayID? {
+        (deviceDescription[Self.screenNumberKey] as? NSNumber)?.uint32Value
+    }
+
+    public static func screen(for displayID: CGDirectDisplayID) -> NSScreen? {
+        screens.first { $0.displayID == displayID }
     }
 }

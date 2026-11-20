@@ -28,6 +28,13 @@ public struct DisplayDevice: Identifiable, Hashable, Sendable {
         self.serialNumber = serialNumber
     }
 
+    public static let hiDPISuffix = " (HiDPI)"
+
+    /// Имя монитора без технического суффикса « (HiDPI)».
+    public var cleanName: String {
+        name.replacingOccurrences(of: Self.hiDPISuffix, with: "")
+    }
+
     /// Стабильный идентификатор модели монитора для сохранения настроек между сессиями.
     public var persistentIdentifier: String {
         if isBuiltin {

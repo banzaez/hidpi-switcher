@@ -1,15 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// Протокол презентера диалогов обновления.
-@MainActor
-public protocol UpdateDialogPresenter: AnyObject {
-    func showUpdateDialog(store: UpdateStore)
-    func dismissUpdateDialog()
-    func showUpToDateAlert(version: SemanticVersion)
-    func showErrorAlert(message: String, releaseURL: URL?)
-}
-
 /// Нативный SwiftUI интерфейс окна обновления приложения (Sparkle-стиль).
 struct UpdateDialogView: View {
     @Bindable var store: UpdateStore
@@ -146,19 +137,13 @@ struct UpdateDialogView: View {
                     }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(store.availableUpdate?.downloadURL == nil && store.availableUpdate == nil)
+                    .disabled(store.availableUpdate == nil)
                 }
             }
         }
         .padding(20)
         .frame(width: 500)
     }
-}
-
-/// Специальная панель с гарантированной поддержкой фокуса ввода.
-private final class UpdateKeyPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
 }
 
 /// Нативный macOS-контроллер плавающего модального окна обновления (NSPanel).
@@ -180,27 +165,12 @@ public final class UpdatePresenter: NSObject, UpdateDialogPresenter, NSWindowDel
             return
         }
 
-        let contentView = UpdateDialogView(store: store)
-        let hostingController = NSHostingController(rootView: contentView)
-        let fittingSize = hostingController.view.fittingSize
-
-        let newPanel = UpdateKeyPanel(
-            contentRect: NSRect(origin: .zero, size: fittingSize),
-            styleMask: [.titled, .closable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
+        let newPanel = FloatingKeyPanel.make(
+            title: "Обновление HiDpiSwitcher",
+            level: .floating,
+            rootView: UpdateDialogView(store: store),
+            delegate: self
         )
-        newPanel.title = "Обновление HiDpiSwitcher"
-        newPanel.titlebarAppearsTransparent = true
-        newPanel.titleVisibility = .hidden
-        newPanel.isFloatingPanel = true
-        newPanel.level = .floating
-        newPanel.isMovableByWindowBackground = true
-        newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        newPanel.contentViewController = hostingController
-        newPanel.setContentSize(fittingSize)
-        newPanel.isReleasedWhenClosed = false
-        newPanel.delegate = self
 
         self.panel = newPanel
         newPanel.center()

@@ -12,13 +12,10 @@ public protocol DisplayOverrideInstallerProtocol: AnyObject {
 }
 
 public enum DisplayOverrideError: LocalizedError {
-    case serializationFailed
     case privilegedExecutionFailed(String)
 
     public var errorDescription: String? {
         switch self {
-        case .serializationFailed:
-            return "Не удалось сериализовать профиль Override Plist"
         case .privilegedExecutionFailed(let message):
             return "Не удалось выполнить операцию с правами администратора: \(message)"
         }

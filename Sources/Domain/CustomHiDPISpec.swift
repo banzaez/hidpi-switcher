@@ -141,18 +141,6 @@ public enum CustomHiDPISpec {
         return list.first
     }
 
-    /// Кодирует базовую 8-байтную запись `scale-resolutions` (Big-Endian: width, height).
-    public static func encodeBaseResolutionEntry(
-        width: UInt32,
-        height: UInt32
-    ) -> Data {
-        let words: (UInt32, UInt32) = (
-            width.bigEndian,
-            height.bigEndian
-        )
-        return withUnsafeBytes(of: words) { Data($0) }
-    }
-
     /// Кодирует запись `scale-resolutions` (16 байт Big-Endian: width, height, scale, flags) без аллокации промежуточного массива.
     public static func encodeScaleResolutionEntry(
         width: UInt32,
@@ -204,9 +192,8 @@ public enum CustomHiDPISpec {
             }
         }
 
-        let cleanName = device.name.replacingOccurrences(of: " (HiDPI)", with: "")
         return [
-            "DisplayProductName": "\(cleanName) (HiDPI)",
+            "DisplayProductName": "\(device.cleanName)\(DisplayDevice.hiDPISuffix)",
             "DisplayVendorID": Int(device.vendorNumber),
             "DisplayProductID": Int(device.modelNumber),
             "scale-resolutions": scaleResolutions

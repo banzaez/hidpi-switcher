@@ -90,36 +90,34 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
     }
 
     private var sessionsByPhysicalID: [CGDirectDisplayID: ActiveSession] = [:]
+    private var physicalIDByVirtualID: [CGDirectDisplayID: CGDirectDisplayID] = [:]
 
     public init() {}
 
-    public func isVirtualHiDPIActive(for physicalDisplayID: CGDirectDisplayID) -> Bool {
-        if sessionsByPhysicalID[physicalDisplayID] != nil {
-            return true
+    private func session(for displayID: CGDirectDisplayID) -> ActiveSession? {
+        if let direct = sessionsByPhysicalID[displayID] {
+            return direct
         }
-        // Также проверяем, не является ли переданный ID уже самим виртуальным экраном активной сессии
-        return sessionsByPhysicalID.values.contains { $0.virtualDisplayID == physicalDisplayID }
+        if let physicalID = physicalIDByVirtualID[displayID] {
+            return sessionsByPhysicalID[physicalID]
+        }
+        return nil
+    }
+
+    public func isVirtualHiDPIActive(for physicalDisplayID: CGDirectDisplayID) -> Bool {
+        session(for: physicalDisplayID) != nil
     }
 
     public func virtualDisplayID(for physicalDisplayID: CGDirectDisplayID) -> CGDirectDisplayID? {
-        sessionsByPhysicalID[physicalDisplayID]?.virtualDisplayID
+        session(for: physicalDisplayID)?.virtualDisplayID
     }
 
     public func physicalDevice(for displayID: CGDirectDisplayID) -> DisplayDevice? {
-        if let session = sessionsByPhysicalID[displayID] {
-            return session.physicalDevice
-        }
-        return sessionsByPhysicalID.values.first { $0.virtualDisplayID == displayID }?.physicalDevice
+        session(for: displayID)?.physicalDevice
     }
 
     public func nativeResolution(for displayID: CGDirectDisplayID) -> (width: Int, height: Int)? {
-        if let session = sessionsByPhysicalID[displayID] {
-            return (session.nativeWidth, session.nativeHeight)
-        }
-        if let session = sessionsByPhysicalID.values.first(where: { $0.virtualDisplayID == displayID }) {
-            return (session.nativeWidth, session.nativeHeight)
-        }
-        return nil
+        session(for: displayID).map { ($0.nativeWidth, $0.nativeHeight) }
     }
 
     public func enableVirtualHiDPI(
@@ -129,11 +127,8 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         refreshRate: Double,
         additionalRefreshRates: [Double] = []
     ) -> CGDirectDisplayID? {
-        if let existing = sessionsByPhysicalID[device.id] {
+        if let existing = session(for: device.id) {
             return existing.virtualDisplayID
-        }
-        if let existingByVirtual = sessionsByPhysicalID.values.first(where: { $0.virtualDisplayID == device.id }) {
-            return existingByVirtual.virtualDisplayID
         }
 
         guard let descClass = NSClassFromString("CGVirtualDisplayDescriptor"),
@@ -150,7 +145,7 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         )
         guard let maxRes = resolutions.first else { return nil }
 
-        let cleanName = device.name.replacingOccurrences(of: " (HiDPI)", with: "")
+        let cleanName = device.cleanName
         let cleanDevice = DisplayDevice(
             id: device.id,
             name: cleanName,
@@ -166,7 +161,7 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         descriptor.vendorID = 0xF0F0
         descriptor.productID = device.modelNumber &+ 0x1000
         descriptor.serialNum = device.id
-        descriptor.name = "\(cleanName) (HiDPI)"
+        descriptor.name = "\(cleanName)\(DisplayDevice.hiDPISuffix)"
         descriptor.maxPixelsWide = UInt32(maxRes.backingWidth)
         descriptor.maxPixelsHigh = UInt32(maxRes.backingHeight)
 
@@ -263,15 +258,14 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
             virtualDisplayID: vDisplayID,
             virtualDisplayObject: virtualDisplay
         )
+        physicalIDByVirtualID[vDisplayID] = device.id
         log.notice("Виртуальный HiDPI-фреймбуфер активирован (physical: \(device.id) -> virtual: \(vDisplayID))")
         return vDisplayID
     }
 
     @discardableResult
     public func disableVirtualHiDPI(for displayID: CGDirectDisplayID) -> CGDirectDisplayID? {
-        let session = sessionsByPhysicalID[displayID]
-            ?? sessionsByPhysicalID.values.first { $0.virtualDisplayID == displayID }
-        guard let session else { return nil }
+        guard let session = session(for: displayID) else { return nil }
 
         let physicalID = session.physicalDevice.id
         var config: CGDisplayConfigRef?
@@ -281,6 +275,7 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         }
 
         sessionsByPhysicalID.removeValue(forKey: physicalID)
+        physicalIDByVirtualID.removeValue(forKey: session.virtualDisplayID)
         log.notice("Виртуальный HiDPI-фреймбуфер отключён для монитора \(physicalID)")
         return physicalID
     }
@@ -290,5 +285,6 @@ public final class LiveVirtualHiDPIService: VirtualHiDPIServiceProtocol {
         for key in keys {
             disableVirtualHiDPI(for: key)
         }
+        physicalIDByVirtualID.removeAll()
     }
 }

@@ -106,6 +106,8 @@ public final class DisplayStore {
     /// Кэш сырых видеорежимов текущего монитора для устранения повторных CGS-вызовов при переключении режима/фильтра.
     @ObservationIgnored
     private var cachedRawModes: (displayID: CGDirectDisplayID, modes: [DisplayMode])?
+    @ObservationIgnored
+    private var hasResolvedInitialDisplay: Bool
 
     public init(
         hardwareClient: DisplayHardwareClientProtocol = LiveDisplayHardwareClient(),
@@ -123,7 +125,9 @@ public final class DisplayStore {
         self.overrideInstaller = overrideInstaller
         self.revertTimeoutSeconds = revertTimeoutSeconds
         self.revertPresenter = revertPresenter
-        self.selectedDisplayID = preferencesStore.preferredDisplayID ?? CGMainDisplayID()
+        let savedDisplayID = preferencesStore.preferredDisplayID
+        self.hasResolvedInitialDisplay = savedDisplayID != nil
+        self.selectedDisplayID = savedDisplayID ?? CGMainDisplayID()
         self.autoRestoreSavedMode = preferencesStore.autoRestoreSavedMode
         self.globalHotKeysEnabled = preferencesStore.globalHotKeysEnabled
         self.showAllResolutions = preferencesStore.showAllResolutions
@@ -179,7 +183,10 @@ public final class DisplayStore {
 
     public func selectDisplay(_ id: CGDirectDisplayID) {
         guard selectedDisplayID != id else { return }
-        cancelRevertTimer(confirm: true)
+        if pendingRevertSeconds != nil {
+            revertPendingMode()
+        }
+        hasResolvedInitialDisplay = true
         preferredRefreshRate = nil
         cachedRawModes = nil
         selectedDisplayID = id
@@ -189,9 +196,28 @@ public final class DisplayStore {
         refreshModes()
     }
 
+    /// Скрывает дублирующийся физический slave-экран, когда для него активен виртуальный HiDPI-дисплей,
+    /// и перенаправляет `selectedDisplayID` с физического ID на виртуальный.
+    private func filterActiveDisplays(_ rawDevices: [DisplayDevice]) -> [DisplayDevice] {
+        let activeIDs = Set(rawDevices.map(\.id))
+        return rawDevices.filter { device in
+            if let vID = virtualHiDPIService.virtualDisplayID(for: device.id),
+               vID != device.id,
+               activeIDs.contains(vID) {
+                if selectedDisplayID == device.id {
+                    selectedDisplayID = vID
+                }
+                return false
+            }
+            return true
+        }
+    }
+
     public func refreshDisplays() {
-        let devices = hardwareClient.activeDisplays()
-        guard !devices.isEmpty else { return }
+        let rawDevices = hardwareClient.activeDisplays()
+        guard !rawDevices.isEmpty else { return }
+
+        let devices = filterActiveDisplays(rawDevices)
 
         let activePersistentIDs = Set(devices.map {
             (virtualHiDPIService.physicalDevice(for: $0.id) ?? $0).persistentIdentifier
@@ -202,8 +228,10 @@ public final class DisplayStore {
             connectedDisplays = devices
         }
 
-        if !devices.contains(where: { $0.id == selectedDisplayID }) {
-            let savedID = preferencesStore.preferredDisplayID
+        if !hasResolvedInitialDisplay || !devices.contains(where: { $0.id == selectedDisplayID }) {
+            let savedID = preferencesStore.preferredDisplayID.map {
+                virtualHiDPIService.virtualDisplayID(for: $0) ?? $0
+            }
             let preferred = devices.first(where: { $0.id == savedID })
                 ?? devices.first(where: { !$0.isBuiltin })
                 ?? devices.first(where: { $0.isMain })
@@ -211,6 +239,7 @@ public final class DisplayStore {
             if let newID = preferred?.id {
                 selectedDisplayID = newID
             }
+            hasResolvedInitialDisplay = true
         }
 
         refreshModes(invalidateCache: true)
@@ -310,18 +339,14 @@ public final class DisplayStore {
                preferencesStore.isVirtualHiDPIEnabled(for: physical),
                !virtualHiDPIService.isVirtualHiDPIActive(for: physical.id) {
                 let raw = hardwareClient.allModes(for: physical.id)
-                let best1x = raw.filter { !$0.isHiDPI }.max(by: { $0.area < $1.area }) ?? raw.first
-                let nativeW = best1x?.width ?? 2560
-                let nativeH = best1x?.height ?? 1440
-                let nativeRates = ModeResolver.nativeRefreshRates(in: raw).sorted(by: >).map(Double.init)
-                let primaryHz = nativeRates.first ?? Double(best1x?.freq ?? 60)
+                let spec = ModeResolver.nativePanelSpec(in: raw)
 
                 if let vID = virtualHiDPIService.enableVirtualHiDPI(
                     for: physical,
-                    nativeWidth: nativeW,
-                    nativeHeight: nativeH,
-                    refreshRate: primaryHz > 0 ? primaryHz : 60.0,
-                    additionalRefreshRates: Array(nativeRates.dropFirst())
+                    nativeWidth: spec.width,
+                    nativeHeight: spec.height,
+                    refreshRate: spec.primaryFreq,
+                    additionalRefreshRates: spec.additionalFreqs
                 ) {
                     if selectedDisplayID == physical.id {
                         selectedDisplayID = vID
@@ -329,7 +354,7 @@ public final class DisplayStore {
                     targetDisplayID = vID
                     isVirtualHiDPIActive = true
                     cachedRawModes = nil
-                    let updatedDevices = hardwareClient.activeDisplays()
+                    let updatedDevices = filterActiveDisplays(hardwareClient.activeDisplays())
                     if !updatedDevices.isEmpty, updatedDevices != connectedDisplays {
                         connectedDisplays = updatedDevices
                     }
@@ -422,7 +447,7 @@ public final class DisplayStore {
             let shouldConfirm = alwaysConfirmModeChanges || !isVerified
 
             if shouldConfirm && revertTimeoutSeconds > 0, let previous {
-                startRevertTimer(from: previous, to: mode, on: device)
+                startRevertTimer(from: previous)
             } else {
                 cancelRevertTimer(confirm: false)
                 preferencesStore.setPreferredModeKey(modeKey, for: device)
@@ -448,7 +473,7 @@ public final class DisplayStore {
         refreshModes()
     }
 
-    private func startRevertTimer(from safeMode: DisplayMode, to newMode: DisplayMode, on device: DisplayDevice) {
+    private func startRevertTimer(from safeMode: DisplayMode) {
         revertTimerTask?.cancel()
         if previousSafeMode == nil {
             previousSafeMode = safeMode
@@ -525,22 +550,24 @@ public final class DisplayStore {
         effectivePhysicalDevice?.isBuiltin ?? false
     }
 
+    /// Подсказывает пользователю включить виртуальный 2K / Ultrawide HiDPI, если у внешнего монитора нет рабочих промежуточных HiDPI-режимов.
+    public var needsVirtualHiDPIHint: Bool {
+        guard currentMode != nil, !isBuiltinSelected, !isVirtualHiDPIActive else { return false }
+        let native = nativeResolutionForSelectedDisplay()
+        return !ModeResolver.hasIntermediateHiDPIModes(
+            in: availableModes,
+            nativeWidth: native.width,
+            nativeHeight: native.height
+        )
+    }
+
     /// Определяет нативное физическое разрешение и доступные частоты выбранного монитора.
-    private func nativeResolutionForSelectedDisplay() -> (width: Int, height: Int, freq: Double, additionalFreqs: [Double]) {
+    private func nativeResolutionForSelectedDisplay() -> (width: Int, height: Int, primaryFreq: Double, additionalFreqs: [Double]) {
+        let spec = ModeResolver.nativePanelSpec(in: availableModes, fallbackMode: currentMode)
         if let vNative = virtualHiDPIService.nativeResolution(for: selectedDisplayID) {
-            let freq = Double(currentMode?.freq ?? 60)
-            let rates = ModeResolver.nativeRefreshRates(in: availableModes).sorted(by: >).map(Double.init)
-            return (vNative.width, vNative.height, freq > 0 ? freq : 60.0, rates)
+            return (vNative.width, vNative.height, spec.primaryFreq, spec.additionalFreqs)
         }
-        let best1x = availableModes.filter { !$0.isHiDPI }.max(by: { $0.area < $1.area }) ?? currentMode
-        let width = best1x?.width ?? 2560
-        let height = best1x?.height ?? 1440
-        let freq = Double(currentMode?.freq ?? best1x?.freq ?? 60)
-        let rates = ModeResolver.nativeRefreshRates(in: availableModes)
-            .sorted(by: >)
-            .map(Double.init)
-            .filter { $0 != freq }
-        return (width, height, freq > 0 ? freq : 60.0, rates)
+        return spec
     }
 
     /// Мгновенно включает или выключает виртуальный HiDPI-фреймбуфер (`CGVirtualDisplay` + аппаратный Mirroring).
@@ -570,7 +597,7 @@ public final class DisplayStore {
             for: device,
             nativeWidth: native.width,
             nativeHeight: native.height,
-            refreshRate: native.freq,
+            refreshRate: native.primaryFreq,
             additionalRefreshRates: native.additionalFreqs
         ) {
             preferencesStore.setVirtualHiDPIEnabled(true, for: device)

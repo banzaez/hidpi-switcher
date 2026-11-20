@@ -138,9 +138,21 @@ public enum ModeResolver {
 
     /// Нативное соотношение сторон панели (по максимальному по площади режиму).
     public static func nativeAspectRatio(in modes: [DisplayMode]) -> Double? {
-        let standardMax = modes.filter { !$0.isHiDPI && $0.height > 0 }.max(by: { $0.area < $1.area })
-        let fallbackMax = modes.filter { $0.height > 0 }.max(by: { $0.area < $1.area })
-        guard let ref = standardMax ?? fallbackMax, ref.height > 0 else { return nil }
+        var standardMax: DisplayMode?
+        var fallbackMax: DisplayMode?
+
+        for mode in modes where mode.height > 0 {
+            if !mode.isHiDPI {
+                if standardMax.map({ mode.area > $0.area }) ?? true {
+                    standardMax = mode
+                }
+            }
+            if fallbackMax.map({ mode.area > $0.area }) ?? true {
+                fallbackMax = mode
+            }
+        }
+
+        guard let ref = standardMax ?? fallbackMax else { return nil }
         return Double(ref.width) / Double(ref.height)
     }
 
@@ -165,9 +177,47 @@ public enum ModeResolver {
 
     /// Частоты нативного сигнала: частоты 1x-режимов с наибольшей площадью (физическое разрешение панели).
     public static func nativeRefreshRates(in modes: [DisplayMode]) -> Set<Int> {
-        let standard = modes.filter { !$0.isHiDPI }
-        guard let maxArea = standard.map(\.area).max() else { return [] }
-        return Set(standard.filter { $0.area == maxArea && $0.freq > 0 }.map(\.freq))
+        var maxArea = -1
+        for mode in modes where !mode.isHiDPI {
+            if mode.area > maxArea {
+                maxArea = mode.area
+            }
+        }
+        guard maxArea >= 0 else { return [] }
+
+        var rates: Set<Int> = []
+        for mode in modes where !mode.isHiDPI && mode.area == maxArea && mode.freq > 0 {
+            rates.insert(mode.freq)
+        }
+        return rates
+    }
+
+    /// Определяет нативное разрешение и доступные частоты обновления панели для создания виртуального HiDPI-буфера.
+    public static func nativePanelSpec(
+        in modes: [DisplayMode],
+        fallbackMode: DisplayMode? = nil
+    ) -> (width: Int, height: Int, primaryFreq: Double, additionalFreqs: [Double]) {
+        var best1x: DisplayMode?
+        var bestAny: DisplayMode?
+        for mode in modes {
+            if !mode.isHiDPI, best1x.map({ mode.area > $0.area }) ?? true {
+                best1x = mode
+            }
+            if bestAny.map({ mode.area > $0.area }) ?? true {
+                bestAny = mode
+            }
+        }
+
+        let reference = best1x ?? fallbackMode ?? bestAny
+        let width = reference?.width ?? 2560
+        let height = reference?.height ?? 1440
+
+        let sortedRates = nativeRefreshRates(in: modes).sorted(by: >).map(Double.init)
+        let rawPrimary = sortedRates.first ?? Double(fallbackMode?.freq ?? reference?.freq ?? 60)
+        let primaryFreq = rawPrimary > 0 ? rawPrimary : 60.0
+        let additionalFreqs = sortedRates.filter { $0 != primaryFreq }
+
+        return (width, height, primaryFreq, additionalFreqs)
     }
 
     /// Оставляет только режимы с частотой из нативных таймингов панели (текущий режим сохраняется всегда).
@@ -233,9 +283,7 @@ public enum ModeResolver {
             $0.width == current.width && $0.height == current.height
         }
         if let bestGeometryMatch = sameGeometry.min(by: {
-            let d0 = abs($0.freq - current.freq)
-            let d1 = abs($1.freq - current.freq)
-            return d0 != d1 ? d0 < d1 : $0.freq > $1.freq
+            isBetterFrequencyMatch($0, $1, targetFreq: current.freq)
         }) {
             return bestGeometryMatch
         }
@@ -247,9 +295,7 @@ public enum ModeResolver {
             $0.width == scaledWidth && $0.height == scaledHeight
         }
         if let bestScaled = scaledMatches.min(by: {
-            let d0 = abs($0.freq - current.freq)
-            let d1 = abs($1.freq - current.freq)
-            return d0 != d1 ? d0 < d1 : $0.freq > $1.freq
+            isBetterFrequencyMatch($0, $1, targetFreq: current.freq)
         }) {
             return bestScaled
         }
@@ -264,9 +310,17 @@ public enum ModeResolver {
             if areaDiff0 != areaDiff1 {
                 return areaDiff0 < areaDiff1
             }
-            let freqDiff0 = abs(lhs.freq - current.freq)
-            let freqDiff1 = abs(rhs.freq - current.freq)
-            return freqDiff0 != freqDiff1 ? freqDiff0 < freqDiff1 : lhs.freq > rhs.freq
+            return isBetterFrequencyMatch(lhs, rhs, targetFreq: current.freq)
         }
+    }
+
+    private static func isBetterFrequencyMatch(
+        _ lhs: DisplayMode,
+        _ rhs: DisplayMode,
+        targetFreq: Int
+    ) -> Bool {
+        let d0 = abs(lhs.freq - targetFreq)
+        let d1 = abs(rhs.freq - targetFreq)
+        return d0 != d1 ? d0 < d1 : lhs.freq > rhs.freq
     }
 }

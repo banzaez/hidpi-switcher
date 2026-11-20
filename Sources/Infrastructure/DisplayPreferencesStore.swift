@@ -52,6 +52,7 @@ public final class UserDefaultsDisplayPreferencesStore: DisplayPreferencesStoreP
     private var unloadedPreferredModeIDs: Set<String> = []
     private var favoriteModesCache: [String: [ModeKey]] = [:]
     private var verifiedModesCache: [String: Set<ModeKey>] = [:]
+    private var virtualHiDPICache: [String: Bool] = [:]
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -195,12 +196,20 @@ public final class UserDefaultsDisplayPreferencesStore: DisplayPreferencesStoreP
     }
 
     public func isVirtualHiDPIEnabled(for display: DisplayDevice) -> Bool {
-        let storageKey = Keys.virtualHiDPIPrefix + display.persistentIdentifier
-        return defaults.bool(forKey: storageKey)
+        let pid = display.persistentIdentifier
+        if let cached = virtualHiDPICache[pid] {
+            return cached
+        }
+        let storageKey = Keys.virtualHiDPIPrefix + pid
+        let enabled = defaults.bool(forKey: storageKey)
+        virtualHiDPICache[pid] = enabled
+        return enabled
     }
 
     public func setVirtualHiDPIEnabled(_ enabled: Bool, for display: DisplayDevice) {
-        let storageKey = Keys.virtualHiDPIPrefix + display.persistentIdentifier
+        let pid = display.persistentIdentifier
+        virtualHiDPICache[pid] = enabled
+        let storageKey = Keys.virtualHiDPIPrefix + pid
         defaults.set(enabled, forKey: storageKey)
     }
 }
