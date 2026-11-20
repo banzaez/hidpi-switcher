@@ -85,11 +85,11 @@ public final class GitHubUpdateService: UpdateCheckingService, UpdateDownloading
             throw UpdateServiceError.releaseParsingFailed("Некорректный URL репозитория")
         }
 
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.httpMethod = "GET"
         request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.setValue("HiDpiSwitcher/\(currentVersion.rawString)", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 15
 
         let (data, response) = try await session.data(for: request)
 
