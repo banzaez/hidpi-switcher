@@ -1,7 +1,9 @@
-# HiDpiSwitcher
+<p align="center">
+  <img src="Resources/hero-banner.png" alt="HiDpiSwitcher — Кристально чёткий Retina 2x для любого внешнего монитора" width="100%" />
+</p>
 
 <p align="center">
-  <img src="Resources/AppIcon.png" alt="HiDpiSwitcher App Icon" width="128" height="128" />
+  <img src="Resources/AppIcon.png" alt="HiDpiSwitcher App Icon" width="76" height="76" />
 </p>
 
 <p align="center">

@@ -256,20 +256,25 @@ struct HiDpiApp: App {
         }
     }
 
-    private var statusIcon: String {
+    private var menuBarIconState: MenuBarIconState {
         if displayStore.pendingRevertSeconds != nil {
-            return "clock.arrow.circlepath"
+            return .pendingRevert
         }
-        return displayStore.isHiDPIActive ? "sparkles.tv" : "display"
+        if displayStore.isVirtualHiDPIActive {
+            return .virtualHiDPI
+        }
+        return displayStore.isHiDPIActive ? .hidpi : .standard
     }
 
     var body: some Scene {
-        MenuBarExtra("HiDPI Switcher", systemImage: statusIcon) {
+        MenuBarExtra {
             MenuBarContentView(
                 displayStore: displayStore,
                 launchStore: launchStore,
                 updateStore: updateStore
             )
+        } label: {
+            Image(nsImage: MenuBarIcon.image(for: menuBarIconState))
         }
     }
 }
