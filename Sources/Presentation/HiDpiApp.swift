@@ -16,9 +16,11 @@ struct MenuBarContentView: View {
 
     var body: some View {
         // 0. Баннер доступного обновления (если найдено)
-        if let update = updateStore.availableUpdate {
-            Button("⚡️ Доступно обновление (\(update.version.description))...") {
-                updateStore.presentUpdateDialog()
+        if let availableVersion = updateStore.availableUpdateVersion {
+            Button("⚡️ Доступно обновление (\(availableVersion))...") {
+                Task {
+                    await updateStore.checkForUpdates(manual: true)
+                }
             }
             Divider()
         }
@@ -198,12 +200,12 @@ struct MenuBarContentView: View {
                 set: { updateStore.automaticallyCheckForUpdates = $0 }
             ))
 
-            Button(updateStore.state == .checking ? "Проверка обновлений..." : "Проверить обновления...") {
+            Button(updateStore.isChecking ? "Проверка обновлений..." : "Проверить обновления...") {
                 Task {
                     await updateStore.checkForUpdates(manual: true)
                 }
             }
-            .disabled(updateStore.state == .checking)
+            .disabled(updateStore.isChecking)
         }
 
         Divider()
@@ -228,7 +230,6 @@ struct HiDpiApp: App {
     @State private var launchStore = LaunchAtLoginStore()
     @State private var updateStore: UpdateStore
     private let revertPresenter: RevertConfirmationPresenter
-    private let updatePresenter: UpdatePresenter
 
     init() {
         let rPresenter = RevertConfirmationPresenter()
@@ -236,9 +237,7 @@ struct HiDpiApp: App {
         let dStore = DisplayStore(revertPresenter: rPresenter)
         _displayStore = State(initialValue: dStore)
 
-        let uPresenter = UpdatePresenter()
-        self.updatePresenter = uPresenter
-        let uStore = UpdateStore(presenter: uPresenter)
+        let uStore = UpdateStore()
         _updateStore = State(initialValue: uStore)
 
         NotificationCenter.default.addObserver(
@@ -249,10 +248,6 @@ struct HiDpiApp: App {
             MainActor.assumeIsolated {
                 dStore.cleanupOnTerminate()
             }
-        }
-
-        Task {
-            await uStore.performStartupCheckIfNeeded()
         }
     }
 

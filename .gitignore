@@ -5,6 +5,13 @@
 *.swp
 *~
 *.zip
+*.delta
+*.p12
+*.key
+*.crt
+*.pem
+*.cer
+certificates/
 .idea/
 .vscode/
 .swiftpm/

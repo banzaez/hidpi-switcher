@@ -26,5 +26,11 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>https://raw.githubusercontent.com/banzaez/hidpi-switcher/main/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>RFPVJFpi1khZw92PWqsHMNzPWzpG3xyggJd7ygFN2gk=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
 </dict>
 </plist>

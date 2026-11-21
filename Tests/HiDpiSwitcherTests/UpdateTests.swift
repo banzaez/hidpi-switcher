@@ -4,56 +4,26 @@ import Testing
 
 // MARK: - Mocks
 
-private final class MockUpdateChecker: UpdateCheckingService, @unchecked Sendable {
-    var resultToReturn: Result<UpdateCheckResult, Error>
+@MainActor
+private final class MockAppUpdateService: AppUpdateManaging {
+    var status: UpdateCheckResult = .idle
+    var isChecking: Bool = false
+    var currentVersion: String = "2.5.1"
+    var automaticallyCheckForUpdates: Bool = true
+    var recordedAutoCheckValues: [Bool] = []
+    var recordedCheckCalls: [Bool] = []
+    var nextResult: UpdateCheckResult = .upToDate(version: "2.5.1")
 
-    init(resultToReturn: Result<UpdateCheckResult, Error>) {
-        self.resultToReturn = resultToReturn
+    func setAutoCheckEnabled(_ enabled: Bool) {
+        automaticallyCheckForUpdates = enabled
+        recordedAutoCheckValues.append(enabled)
     }
 
-    func checkForUpdates(currentVersion: SemanticVersion) async throws -> UpdateCheckResult {
-        try resultToReturn.get()
-    }
-}
-
-private final class MockUpdateDownloader: UpdateDownloadingService, @unchecked Sendable {
-    var downloadedURLToReturn: URL = URL(fileURLWithPath: "/tmp/mock-update.zip")
-    var shouldFail: Bool = false
-    var waitUntilCancelled: Bool = false
-    var didCancel: Bool = false
-    var onDownloadStarted: (@Sendable () -> Void)?
-
-    func downloadUpdate(
-        from url: URL,
-        progressHandler: @Sendable @escaping (Double) -> Void
-    ) async throws -> URL {
-        if shouldFail {
-            throw UpdateServiceError.downloadFailed("Mock network failure")
-        }
-        progressHandler(0.5)
-        if waitUntilCancelled {
-            onDownloadStarted?()
-            do {
-                try await Task.sleep(for: .seconds(10))
-            } catch is CancellationError {
-                didCancel = true
-                throw CancellationError()
-            }
-        }
-        progressHandler(1.0)
-        return downloadedURLToReturn
-    }
-}
-
-private final class MockUpdateInstaller: UpdateInstallingService, @unchecked Sendable {
-    var didCallInstall: Bool = false
-    var shouldFail: Bool = false
-
-    func installAndRelaunch(from archiveURL: URL, currentAppURL: URL) throws {
-        if shouldFail {
-            throw UpdateServiceError.extractionFailed("Mock extraction error")
-        }
-        didCallInstall = true
+    @discardableResult
+    func checkForUpdates(isUserInitiated: Bool) async -> UpdateCheckResult {
+        recordedCheckCalls.append(isUserInitiated)
+        status = nextResult
+        return nextResult
     }
 }
 
@@ -75,341 +45,62 @@ private final class MockUpdatePreferencesStore: UpdatePreferencesStore, @uncheck
     }
 }
 
-@MainActor
-private final class MockUpdatePresenter: UpdateDialogPresenter {
-    var didShowUpdateDialog: Bool = false
-    var didDismissUpdateDialog: Bool = false
-    var upToDateAlertVersion: SemanticVersion? = nil
-    var errorMessage: String? = nil
-
-    func showUpdateDialog(store: UpdateStore) {
-        didShowUpdateDialog = true
-    }
-
-    func dismissUpdateDialog() {
-        didDismissUpdateDialog = true
-    }
-
-    func showUpToDateAlert(version: SemanticVersion) {
-        upToDateAlertVersion = version
-    }
-
-    func showErrorAlert(message: String, releaseURL: URL?) {
-        errorMessage = message
-    }
-}
-
 // MARK: - Test Suite
 
-@Suite("HiDpiSwitcher Professional Update Checker & Updater Tests")
+@Suite("HiDpiSwitcher Sparkle Update Service & Store Tests")
 struct UpdateTests {
 
-    @Test("Семантическое версионирование: корректное сравнение версий и префиксов")
-    func semanticVersionComparison() {
-        let v210 = SemanticVersion(fromString: "2.1.0")
-        let v210WithPrefix = SemanticVersion(fromString: "v2.1.0")
-        let v220 = SemanticVersion(fromString: "2.2.0")
-        let v221 = SemanticVersion(fromString: "v2.2.1")
-        let v230 = SemanticVersion(fromString: "2.3.0")
-        let v300 = SemanticVersion(fromString: "3.0.0")
-        let v230Beta = SemanticVersion(fromString: "v2.3.0-beta.1")
-
-        #expect(v210 != nil)
-        #expect(v210 == v210WithPrefix)
-        #expect(v210! < v220!)
-        #expect(v220! < v221!)
-        #expect(v221! < v230!)
-        #expect(v230! < v300!)
-
-        // Pre-release версия должна быть меньше релизной версии с тем же номером
-        #expect(v230Beta! < v230!)
-        #expect(v221! < v230Beta!)
-
-        // Описание версий
-        #expect(v220!.description == "2.2.0")
-        #expect(v230Beta!.description == "2.3.0-beta.1")
-
-        // Обработка некорректных строк
-        #expect(SemanticVersion(fromString: "") == nil)
-        #expect(SemanticVersion(fromString: "invalid") == nil)
-        #expect(SemanticVersion(fromString: "2.abc.0") == nil)
-        #expect(SemanticVersion(fromString: "2.0-") == nil)
-        #expect(SemanticVersion(fromString: "1.2.3.4") == nil)
-    }
-
-    @Test("SemVer 2.0: численное сравнение pre-release и поддержка build-метаданных")
-    func semanticVersionPrereleaseAndMetadata() {
-        let beta2 = SemanticVersion(fromString: "2.3.0-beta.2")
-        let beta10 = SemanticVersion(fromString: "2.3.0-beta.10")
-        let alpha = SemanticVersion(fromString: "2.3.0-alpha.99")
-        let withBuild = SemanticVersion(fromString: "v2.3.0+20261120")
-
-        #expect(beta2 != nil)
-        #expect(beta10 != nil)
-        #expect(alpha != nil)
-        #expect(withBuild == SemanticVersion(major: 2, minor: 3, patch: 0))
-
-        #expect(alpha! < beta2!)
-        #expect(beta2! < beta10!)
-        #expect(beta10! < withBuild!)
-    }
-
-    @Test("Парсинг JSON ответа GitHub Releases API с выделением .zip архива")
-    func gitHubReleaseJsonParsing() throws {
-        let json = """
-        {
-          "tag_name": "v2.3.0",
-          "name": "HiDpiSwitcher 2.3.0 — Обновления",
-          "body": "### Что нового:\\n- Новая функция",
-          "html_url": "https://github.com/banzaez/hidpi-switcher/releases/tag/v2.3.0",
-          "published_at": "2026-11-10T12:00:00Z",
-          "assets": [
-            {
-              "name": "HiDpiSwitcher-v2.3.0.zip",
-              "browser_download_url": "https://github.com/banzaez/hidpi-switcher/releases/download/v2.3.0/HiDpiSwitcher-v2.3.0.zip",
-              "size": 1500000
-            }
-          ]
-        }
-        """
-
-        let data = try #require(json.data(using: .utf8))
-        let service = GitHubUpdateService()
-        let releaseInfo = try service.parseRelease(from: data)
-
-        #expect(releaseInfo.version == SemanticVersion(major: 2, minor: 3, patch: 0))
-        #expect(releaseInfo.rawTagName == "v2.3.0")
-        #expect(releaseInfo.releaseTitle == "HiDpiSwitcher 2.3.0 — Обновления")
-        #expect(releaseInfo.downloadURL?.absoluteString == "https://github.com/banzaez/hidpi-switcher/releases/download/v2.3.0/HiDpiSwitcher-v2.3.0.zip")
-        #expect(releaseInfo.assetName == "HiDpiSwitcher-v2.3.0.zip")
-        #expect(releaseInfo.assetSizeBytes == 1500000)
-        #expect(releaseInfo.formattedSize?.contains("MB") == true || releaseInfo.formattedSize?.contains("МБ") == true)
-    }
-
-    @Test("Ручная проверка при наличии новой версии открывает диалог обновления")
+    @Test("AppUpdateService безопасно инициализируется вне .app бандла и сравнивает SemVer")
     @MainActor
-    func manualCheckFindsNewUpdate() async {
-        let currentVersion = SemanticVersion(major: 2, minor: 2, patch: 0)
-        let newVersion = SemanticVersion(major: 2, minor: 3, patch: 0)
-        let sampleInfo = UpdateInfo(
-            version: newVersion,
-            rawTagName: "v2.3.0",
-            releaseTitle: "HiDpiSwitcher 2.3.0",
-            releaseNotes: "Новый функционал",
-            htmlURL: URL(string: "https://github.com/banzaez/hidpi-switcher/releases/tag/v2.3.0")!,
-            downloadURL: URL(string: "https://github.com/banzaez/hidpi-switcher/releases/download/v2.3.0/HiDpiSwitcher-v2.3.0.zip")!
-        )
+    func appUpdateServiceSafeInitAndSemVer() async {
+        let service = AppUpdateService()
+        #expect(service.isChecking == false)
+        #expect(service.status == .idle)
 
-        let mockChecker = MockUpdateChecker(resultToReturn: .success(.updateAvailable(sampleInfo)))
-        let mockDownloader = MockUpdateDownloader()
-        let mockInstaller = MockUpdateInstaller()
+        let result = await service.checkForUpdates(isUserInitiated: false)
+        #expect(result == .idle)
+
+        #expect(service.isVersion("2.5.2", greaterThan: "2.5.1") == true)
+        #expect(service.isVersion("2.6.0", greaterThan: "2.5.9") == true)
+        #expect(service.isVersion("3.0.0", greaterThan: "2.9.9") == true)
+        #expect(service.isVersion("2.5.1", greaterThan: "2.5.1") == false)
+        #expect(service.isVersion("2.5.0", greaterThan: "2.5.1") == false)
+    }
+
+    @Test("UpdateStore синхронизирует настройку автопроверки со Sparkle-сервисом")
+    @MainActor
+    func updateStoreSyncsAutoCheck() {
+        let mockService = MockAppUpdateService()
         let mockPrefs = MockUpdatePreferencesStore()
-        let mockPresenter = MockUpdatePresenter()
+        mockPrefs.automaticallyCheckForUpdates = false
 
-        let store = UpdateStore(
-            currentVersion: currentVersion,
-            updateChecker: mockChecker,
-            updateDownloader: mockDownloader,
-            updateInstaller: mockInstaller,
-            preferencesStore: mockPrefs,
-            presenter: mockPresenter
+        let store = UpdateStore(updateService: mockService, preferencesStore: mockPrefs)
+        #expect(mockService.recordedAutoCheckValues == [false])
+        #expect(store.automaticallyCheckForUpdates == false)
+
+        store.automaticallyCheckForUpdates = true
+        #expect(mockPrefs.automaticallyCheckForUpdates == true)
+        #expect(mockService.recordedAutoCheckValues == [false, true])
+    }
+
+    @Test("UpdateStore проксирует проверку обновлений и отображает доступную версию")
+    @MainActor
+    func updateStoreCheckAndAvailableVersion() async {
+        let mockService = MockAppUpdateService()
+        let releaseURL = URL(string: "https://github.com/banzaez/hidpi-switcher/releases/tag/v2.6.0")!
+        let downloadURL = URL(string: "https://github.com/banzaez/hidpi-switcher/releases/download/v2.6.0/HiDpiSwitcher-v2.6.0-macOS.zip")!
+        mockService.nextResult = .updateAvailable(
+            version: "2.6.0",
+            releaseNotes: "Поддержка Sparkle",
+            releaseURL: releaseURL,
+            downloadURL: downloadURL
         )
+
+        let store = UpdateStore(updateService: mockService, preferencesStore: MockUpdatePreferencesStore())
+        #expect(store.availableUpdateVersion == nil)
 
         await store.checkForUpdates(manual: true)
-
-        #expect(store.isUpdateAvailable == true)
-        #expect(store.availableUpdate?.version == newVersion)
-        #expect(mockPresenter.didShowUpdateDialog == true)
-        #expect(mockPrefs.lastCheckDate != nil)
-    }
-
-    @Test("Ручная проверка при актуальной версии выводит информационный алерт")
-    @MainActor
-    func manualCheckUpToDate() async {
-        let currentVersion = SemanticVersion(major: 2, minor: 2, patch: 0)
-        let mockChecker = MockUpdateChecker(resultToReturn: .success(.upToDate(currentVersion: currentVersion)))
-        let mockDownloader = MockUpdateDownloader()
-        let mockInstaller = MockUpdateInstaller()
-        let mockPrefs = MockUpdatePreferencesStore()
-        let mockPresenter = MockUpdatePresenter()
-
-        let store = UpdateStore(
-            currentVersion: currentVersion,
-            updateChecker: mockChecker,
-            updateDownloader: mockDownloader,
-            updateInstaller: mockInstaller,
-            preferencesStore: mockPrefs,
-            presenter: mockPresenter
-        )
-
-        await store.checkForUpdates(manual: true)
-
-        #expect(store.isUpdateAvailable == false)
-        #expect(mockPresenter.upToDateAlertVersion == currentVersion)
-        #expect(mockPresenter.didShowUpdateDialog == false)
-    }
-
-    @Test("Фоновая проверка не беспокоит пользователя, если версия была пропущена")
-    @MainActor
-    func automaticCheckIgnoresSkippedVersion() async {
-        let currentVersion = SemanticVersion(major: 2, minor: 2, patch: 0)
-        let newVersion = SemanticVersion(major: 2, minor: 3, patch: 0)
-        let sampleInfo = UpdateInfo(
-            version: newVersion,
-            rawTagName: "v2.3.0",
-            releaseTitle: "HiDpiSwitcher 2.3.0",
-            releaseNotes: "Новый функционал",
-            htmlURL: URL(string: "https://github.com/banzaez/hidpi-switcher/releases/tag/v2.3.0")!
-        )
-
-        let mockChecker = MockUpdateChecker(resultToReturn: .success(.updateAvailable(sampleInfo)))
-        let mockDownloader = MockUpdateDownloader()
-        let mockInstaller = MockUpdateInstaller()
-        let mockPrefs = MockUpdatePreferencesStore()
-        mockPrefs.skippedVersion = "v2.3.0"
-        let mockPresenter = MockUpdatePresenter()
-
-        let store = UpdateStore(
-            currentVersion: currentVersion,
-            updateChecker: mockChecker,
-            updateDownloader: mockDownloader,
-            updateInstaller: mockInstaller,
-            preferencesStore: mockPrefs,
-            presenter: mockPresenter
-        )
-
-        // Фоновая проверка (manual: false)
-        await store.checkForUpdates(manual: false)
-
-        #expect(store.isUpdateAvailable == false)
-        #expect(mockPresenter.didShowUpdateDialog == false)
-
-        // Ручная проверка (manual: true) всё равно должна открыть диалог
-        await store.checkForUpdates(manual: true)
-        #expect(store.isUpdateAvailable == true)
-        #expect(mockPresenter.didShowUpdateDialog == true)
-    }
-
-    @Test("Пропуск версии сохраняет тег в хранилище настроек")
-    @MainActor
-    func skipVersionPersists() {
-        let mockChecker = MockUpdateChecker(resultToReturn: .success(.upToDate(currentVersion: SemanticVersion(major: 2, minor: 2, patch: 0))))
-        let mockDownloader = MockUpdateDownloader()
-        let mockInstaller = MockUpdateInstaller()
-        let mockPrefs = MockUpdatePreferencesStore()
-        let mockPresenter = MockUpdatePresenter()
-
-        let store = UpdateStore(
-            updateChecker: mockChecker,
-            updateDownloader: mockDownloader,
-            updateInstaller: mockInstaller,
-            preferencesStore: mockPrefs,
-            presenter: mockPresenter
-        )
-
-        let versionToSkip = SemanticVersion(major: 2, minor: 4, patch: 0)
-        store.skipVersion(versionToSkip)
-
-        #expect(mockPrefs.skippedVersion == "2.4.0")
-        #expect(mockPresenter.didDismissUpdateDialog == true)
-    }
-
-    @Test("Загрузка обновления вызывает установщик и передаёт прогресс")
-    @MainActor
-    func downloadAndInstallFlow() async {
-        let newVersion = SemanticVersion(major: 2, minor: 3, patch: 0)
-        let sampleInfo = UpdateInfo(
-            version: newVersion,
-            rawTagName: "v2.3.0",
-            releaseTitle: "HiDpiSwitcher 2.3.0",
-            releaseNotes: "Новый релиз",
-            htmlURL: URL(string: "https://github.com/banzaez/hidpi-switcher")!,
-            downloadURL: URL(string: "https://github.com/banzaez/hidpi-switcher/releases/download/v2.3.0/HiDpiSwitcher-v2.3.0.zip")!
-        )
-
-        let mockChecker = MockUpdateChecker(resultToReturn: .success(.updateAvailable(sampleInfo)))
-        let mockDownloader = MockUpdateDownloader()
-        let mockInstaller = MockUpdateInstaller()
-        let mockPrefs = MockUpdatePreferencesStore()
-        let mockPresenter = MockUpdatePresenter()
-
-        let store = UpdateStore(
-            updateChecker: mockChecker,
-            updateDownloader: mockDownloader,
-            updateInstaller: mockInstaller,
-            preferencesStore: mockPrefs,
-            presenter: mockPresenter
-        )
-
-        await store.checkForUpdates(manual: true)
-        #expect(store.isUpdateAvailable == true)
-
-        await store.downloadAndInstall()
-
-        #expect(mockInstaller.didCallInstall == true)
-        #expect(store.downloadProgress == 1.0)
-    }
-
-    @Test("Отмена загрузки через dismiss сохраняет информацию о релизе и предотвращает установку")
-    @MainActor
-    func cancelDownloadOnDismissPreservesUpdateAndStopsInstall() async {
-        let newVersion = SemanticVersion(major: 2, minor: 3, patch: 0)
-        let sampleInfo = UpdateInfo(
-            version: newVersion,
-            rawTagName: "v2.3.0",
-            releaseTitle: "HiDpiSwitcher 2.3.0",
-            releaseNotes: "Список изменений сохраняется",
-            htmlURL: URL(string: "https://github.com/banzaez/hidpi-switcher")!,
-            downloadURL: URL(string: "https://github.com/banzaez/hidpi-switcher/releases/download/v2.3.0/HiDpiSwitcher-v2.3.0.zip")!
-        )
-
-        let mockChecker = MockUpdateChecker(resultToReturn: .success(.updateAvailable(sampleInfo)))
-        let mockDownloader = MockUpdateDownloader()
-        mockDownloader.waitUntilCancelled = true
-        let mockInstaller = MockUpdateInstaller()
-        let mockPrefs = MockUpdatePreferencesStore()
-        let mockPresenter = MockUpdatePresenter()
-
-        let store = UpdateStore(
-            updateChecker: mockChecker,
-            updateDownloader: mockDownloader,
-            updateInstaller: mockInstaller,
-            preferencesStore: mockPrefs,
-            presenter: mockPresenter
-        )
-
-        await store.checkForUpdates(manual: true)
-        #expect(store.availableUpdate == sampleInfo)
-
-        let startedStream = AsyncStream<Void> { continuation in
-            mockDownloader.onDownloadStarted = {
-                continuation.yield(())
-                continuation.finish()
-            }
-        }
-
-        let downloadTask = Task { @MainActor in
-            await store.downloadAndInstall()
-        }
-
-        for await _ in startedStream { break }
-
-        if case .downloading = store.state {
-            // Ожидаемое состояние во время загрузки
-        } else {
-            Issue.record("Ожидалось состояние .downloading, получено: \(store.state)")
-        }
-        #expect(store.availableUpdate == sampleInfo)
-        #expect(store.isUpdateAvailable == true)
-
-        store.dismiss()
-        await downloadTask.value
-
-        #expect(mockPresenter.didDismissUpdateDialog == true)
-        #expect(mockDownloader.didCancel == true)
-        #expect(mockInstaller.didCallInstall == false)
-        #expect(store.state == .updateAvailable(sampleInfo))
-        #expect(store.availableUpdate == sampleInfo)
-        #expect(store.lastErrorMessage == nil)
+        #expect(mockService.recordedCheckCalls == [true])
+        #expect(store.availableUpdateVersion == "2.6.0")
     }
 }
