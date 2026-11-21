@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>HiDpiSwitcher</title>
+        <item>
+            <title>2.6.0</title>
+            <pubDate>Sat, 21 Nov 2026 09:57:33 +0200</pubDate>
+            <sparkle:version>9</sparkle:version>
+            <sparkle:shortVersionString>2.6.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/banzaez/hidpi-switcher/releases/download/v2.6.0/HiDpiSwitcher-v2.6.0-macOS.zip" length="3160132" type="application/octet-stream" sparkle:edSignature="WAiCGl8nosBii4JW7iXKNhyxULDD51ain3QIr2MHlQK+gKWD4DTiTO2vTZd1VhFzjl/OjOK+1bosCmmWshi6DA=="/>
+        </item>
+    </channel>
+</rss>
